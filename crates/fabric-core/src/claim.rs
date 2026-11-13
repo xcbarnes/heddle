@@ -262,15 +262,30 @@ pub struct ClaimStep {
 }
 
 fn unchanged(c: Option<Claim>, outcome: Result<ClaimReply, ClaimRefusal>) -> ClaimStep {
-    ClaimStep { claim: c, outcome, news: ClaimNews::None }
+    ClaimStep {
+        claim: c,
+        outcome,
+        news: ClaimNews::None,
+    }
 }
 
 fn moved(c: Option<Claim>, reply: ClaimReply, news: ClaimNews) -> ClaimStep {
-    ClaimStep { claim: c, outcome: Ok(reply), news }
+    ClaimStep {
+        claim: c,
+        outcome: Ok(reply),
+        news,
+    }
 }
 
 /// A grant, in step 2 (a new row) or as a takeover in step 3.
-fn grant(c: Option<Claim>, caller: SeatId, t: LeaseTime, ctx: ClaimCtx, cfg: &Config, news: ClaimNews) -> ClaimStep {
+fn grant(
+    c: Option<Claim>,
+    caller: SeatId,
+    t: LeaseTime,
+    ctx: ClaimCtx,
+    cfg: &Config,
+    news: ClaimNews,
+) -> ClaimStep {
     let r = cfg.get();
     if ctx.open_by_caller >= r.max_claims_per_seat {
         return unchanged(c, Err(ClaimRefusal::TooManyClaims));
@@ -282,7 +297,11 @@ fn grant(c: Option<Claim>, caller: SeatId, t: LeaseTime, ctx: ClaimCtx, cfg: &Co
     match Epoch::after(ctx.next_epoch) {
         None => unchanged(c, Err(ClaimRefusal::Exhausted)),
         Some(epoch) => moved(
-            Some(Claim::Held { owner: caller, epoch, expires: t.plus(r.lease) }),
+            Some(Claim::Held {
+                owner: caller,
+                epoch,
+                expires: t.plus(r.lease),
+            }),
             ClaimReply::Granted(epoch),
             news,
         ),
@@ -318,14 +337,18 @@ pub fn claim_step(
         // 2. No row.
         None => match ev {
             ClaimEvent::Claim => grant(c, caller, t, ctx, cfg, ClaimNews::None),
-            ClaimEvent::Quiet { .. } | ClaimEvent::Release { .. } | ClaimEvent::DoneBegin { .. } => {
-                unchanged(c, Err(ClaimRefusal::NotHeld))
-            }
+            ClaimEvent::Quiet { .. }
+            | ClaimEvent::Release { .. }
+            | ClaimEvent::DoneBegin { .. } => unchanged(c, Err(ClaimRefusal::NotHeld)),
             ClaimEvent::DoneAbort { .. } | ClaimEvent::DoneCommit { .. } => {
                 unchanged(c, Err(ClaimRefusal::NotClosing))
             }
         },
-        Some(Claim::Held { owner, epoch, expires }) => {
+        Some(Claim::Held {
+            owner,
+            epoch,
+            expires,
+        }) => {
             // 3. Not the owner.
             if owner != caller {
                 return match ev {
@@ -347,7 +370,11 @@ pub fn claim_step(
             // 5. The phase cell: Live, Stale and Takeable act alike for the owner.
             match ev {
                 ClaimEvent::Claim => moved(
-                    Some(Claim::Held { owner, epoch, expires: expires.max(t.plus(r.lease)) }),
+                    Some(Claim::Held {
+                        owner,
+                        epoch,
+                        expires: expires.max(t.plus(r.lease)),
+                    }),
                     ClaimReply::AlreadyYours,
                     ClaimNews::None,
                 ),
@@ -362,7 +389,12 @@ pub fn claim_step(
                 ),
                 ClaimEvent::Release { .. } => moved(None, ClaimReply::Done, ClaimNews::None),
                 ClaimEvent::DoneBegin { .. } => moved(
-                    Some(Claim::Closing { owner, epoch, deadline: t.plus(r.closing), resume_expires: expires }),
+                    Some(Claim::Closing {
+                        owner,
+                        epoch,
+                        deadline: t.plus(r.closing),
+                        resume_expires: expires,
+                    }),
                     ClaimReply::Done,
                     ClaimNews::None,
                 ),
@@ -371,7 +403,12 @@ pub fn claim_step(
                 }
             }
         }
-        Some(Claim::Closing { owner, epoch, resume_expires, .. }) => {
+        Some(Claim::Closing {
+            owner,
+            epoch,
+            resume_expires,
+            ..
+        }) => {
             if owner != caller {
                 return match ev {
                     ClaimEvent::Claim if p == Phase::ClosingTakeable => {
@@ -393,17 +430,30 @@ pub fn claim_step(
                 ClaimEvent::Quiet { .. } => unchanged(c, Err(ClaimRefusal::Closing)),
                 ClaimEvent::Release { .. } => moved(None, ClaimReply::Done, ClaimNews::None),
                 ClaimEvent::DoneBegin { .. } => moved(
-                    Some(Claim::Closing { owner, epoch, deadline: t.plus(r.closing), resume_expires }),
+                    Some(Claim::Closing {
+                        owner,
+                        epoch,
+                        deadline: t.plus(r.closing),
+                        resume_expires,
+                    }),
                     ClaimReply::Done,
                     ClaimNews::None,
                 ),
                 ClaimEvent::DoneAbort { .. } => moved(
-                    Some(Claim::Held { owner, epoch, expires: resume_expires.max(t.plus(r.lease)) }),
+                    Some(Claim::Held {
+                        owner,
+                        epoch,
+                        expires: resume_expires.max(t.plus(r.lease)),
+                    }),
                     ClaimReply::Done,
                     ClaimNews::None,
                 ),
                 ClaimEvent::DoneCommit { sha, .. } => moved(
-                    Some(Claim::Closed { how: Closure::Done, sha, at: now }),
+                    Some(Claim::Closed {
+                        how: Closure::Done,
+                        sha,
+                        at: now,
+                    }),
                     ClaimReply::Done,
                     ClaimNews::Closed,
                 ),
@@ -415,10 +465,19 @@ pub fn claim_step(
 /// `Sync` from `seat` renews the claim when the seat holds it and it is Held.
 pub fn sync_renew(c: Option<Claim>, seat: SeatId, t: LeaseTime, cfg: &Config) -> Option<Claim> {
     match c {
-        Some(Claim::Held { owner, epoch, expires }) if owner == seat => {
-            Some(Claim::Held { owner, epoch, expires: expires.max(t.plus(cfg.get().lease)) })
-        }
-        Some(Claim::Held { .. }) | Some(Claim::Closing { .. }) | Some(Claim::Closed { .. }) | None => c,
+        Some(Claim::Held {
+            owner,
+            epoch,
+            expires,
+        }) if owner == seat => Some(Claim::Held {
+            owner,
+            epoch,
+            expires: expires.max(t.plus(cfg.get().lease)),
+        }),
+        Some(Claim::Held { .. })
+        | Some(Claim::Closing { .. })
+        | Some(Claim::Closed { .. })
+        | None => c,
     }
 }
 
@@ -431,7 +490,11 @@ pub fn ledger_observe(
     sha: Sha,
     now: RoomTime,
     closed_full: bool,
-) -> (Option<Claim>, Result<ClaimReply, ClaimRefusal>, Option<SeatId>) {
+) -> (
+    Option<Claim>,
+    Result<ClaimReply, ClaimRefusal>,
+    Option<SeatId>,
+) {
     let closed = Some(Claim::Closed { how, sha, at: now });
     match c {
         None if closed_full => (c, Err(ClaimRefusal::Full), None),
@@ -439,16 +502,26 @@ pub fn ledger_observe(
         Some(Claim::Held { owner, .. }) | Some(Claim::Closing { owner, .. }) => {
             (closed, Ok(ClaimReply::Done), Some(owner))
         }
-        Some(Claim::Closed { how: h, sha: s, .. }) if h == how && s == sha => (c, Ok(ClaimReply::NoChange), None),
+        Some(Claim::Closed { how: h, sha: s, .. }) if h == how && s == sha => {
+            (c, Ok(ClaimReply::NoChange), None)
+        }
         Some(Claim::Closed { .. }) => (c, Err(ClaimRefusal::Closed), None),
     }
 }
 
 /// `Admin ReleaseKey`. Returns the row, the outcome and the seat that lost it.
-pub fn admin_release(c: Option<Claim>) -> (Option<Claim>, Result<ClaimReply, ClaimRefusal>, Option<SeatId>) {
+pub fn admin_release(
+    c: Option<Claim>,
+) -> (
+    Option<Claim>,
+    Result<ClaimReply, ClaimRefusal>,
+    Option<SeatId>,
+) {
     match c {
         None => (c, Ok(ClaimReply::NoChange), None),
-        Some(Claim::Held { owner, .. }) | Some(Claim::Closing { owner, .. }) => (None, Ok(ClaimReply::Done), Some(owner)),
+        Some(Claim::Held { owner, .. }) | Some(Claim::Closing { owner, .. }) => {
+            (None, Ok(ClaimReply::Done), Some(owner))
+        }
         Some(Claim::Closed { .. }) => (c, Err(ClaimRefusal::Closed), None),
     }
 }
@@ -457,20 +530,31 @@ pub fn admin_release(c: Option<Claim>) -> (Option<Claim>, Result<ClaimReply, Cla
 pub fn admin_reopen(c: Option<Claim>) -> (Option<Claim>, Result<ClaimReply, ClaimRefusal>) {
     match c {
         Some(Claim::Closed { .. }) => (None, Ok(ClaimReply::Done)),
-        Some(Claim::Held { .. }) | Some(Claim::Closing { .. }) | None => (c, Err(ClaimRefusal::NotClosed)),
+        Some(Claim::Held { .. }) | Some(Claim::Closing { .. }) | None => {
+            (c, Err(ClaimRefusal::NotClosed))
+        }
     }
 }
 
 /// `Taint` or `Admin TaintSeat` for `seat`: every claim it holds becomes Free.
 pub fn taint_free(c: Option<Claim>, seat: SeatId) -> Option<Claim> {
     match c {
-        Some(Claim::Held { owner, .. }) | Some(Claim::Closing { owner, .. }) if owner == seat => None,
-        Some(Claim::Held { .. }) | Some(Claim::Closing { .. }) | Some(Claim::Closed { .. }) | None => c,
+        Some(Claim::Held { owner, .. }) | Some(Claim::Closing { owner, .. }) if owner == seat => {
+            None
+        }
+        Some(Claim::Held { .. })
+        | Some(Claim::Closing { .. })
+        | Some(Claim::Closed { .. })
+        | None => c,
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, clippy::expect_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::expect_used,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
@@ -497,16 +581,29 @@ mod tests {
         for owner in [seat(b"s-aaaaaaaa"), seat(b"s-bbbbbbbb")] {
             for e in [ep(1), ep(2)] {
                 for x in 0..7 {
-                    v.push(Some(Claim::Held { owner, epoch: e, expires: LeaseTime(x) }));
+                    v.push(Some(Claim::Held {
+                        owner,
+                        epoch: e,
+                        expires: LeaseTime(x),
+                    }));
                     for rx in 0..4 {
-                        v.push(Some(Claim::Closing { owner, epoch: e, deadline: LeaseTime(x), resume_expires: LeaseTime(rx) }));
+                        v.push(Some(Claim::Closing {
+                            owner,
+                            epoch: e,
+                            deadline: LeaseTime(x),
+                            resume_expires: LeaseTime(rx),
+                        }));
                     }
                 }
             }
         }
         for how in [Closure::Done, Closure::Dropped] {
             for n in [1, 2] {
-                v.push(Some(Claim::Closed { how, sha: sha(n), at: RoomTime(0) }));
+                v.push(Some(Claim::Closed {
+                    how,
+                    sha: sha(n),
+                    at: RoomTime(0),
+                }));
             }
         }
         v
@@ -516,12 +613,21 @@ mod tests {
         let mut v = Vec::new();
         v.push(ClaimEvent::Claim);
         for e in [ep(1), ep(2)] {
-            v.push(ClaimEvent::Quiet { epoch: e, for_ms: 1 });
-            v.push(ClaimEvent::Quiet { epoch: e, for_ms: 100 });
+            v.push(ClaimEvent::Quiet {
+                epoch: e,
+                for_ms: 1,
+            });
+            v.push(ClaimEvent::Quiet {
+                epoch: e,
+                for_ms: 100,
+            });
             v.push(ClaimEvent::Release { epoch: e });
             v.push(ClaimEvent::DoneBegin { epoch: e });
             v.push(ClaimEvent::DoneAbort { epoch: e });
-            v.push(ClaimEvent::DoneCommit { epoch: e, sha: sha(1) });
+            v.push(ClaimEvent::DoneCommit {
+                epoch: e,
+                sha: sha(1),
+            });
         }
         v
     }
@@ -532,7 +638,11 @@ mod tests {
 
     #[test]
     fn c2_c3_c5_c7_d2_over_every_small_state_event_caller_and_time() {
-        let ctx = ClaimCtx { open_by_caller: 0, live_rows: 0, next_epoch: 2 };
+        let ctx = ClaimCtx {
+            open_by_caller: 0,
+            live_rows: 0,
+            next_epoch: 2,
+        };
         let mut steps = 0u32;
         for c in rows() {
             for ev in events() {
@@ -550,29 +660,52 @@ mod tests {
                         // C3: owner events change a claim only for its owner, at its epoch.
                         if is_owner_event(ev) && s.claim != c {
                             let held = match c {
-                                Some(Claim::Held { owner, epoch, .. }) | Some(Claim::Closing { owner, epoch, .. }) => {
-                                    Some((owner, epoch))
-                                }
+                                Some(Claim::Held { owner, epoch, .. })
+                                | Some(Claim::Closing { owner, epoch, .. }) => Some((owner, epoch)),
                                 Some(Claim::Closed { .. }) | None => None,
                             };
-                            assert_eq!(held.map(|(o, _)| o), Some(caller), "C3 owner: {c:?} {ev:?}");
+                            assert_eq!(
+                                held.map(|(o, _)| o),
+                                Some(caller),
+                                "C3 owner: {c:?} {ev:?}"
+                            );
                             assert_eq!(held.map(|(_, e)| e), ev.epoch(), "C3 epoch: {c:?} {ev:?}");
                         }
                         // C5: no takeover before lease plus grace.
-                        if let (Some(b), Some(a)) = (before, after) {
-                            if b != a {
-                                let p = phase(c.as_ref(), t, &CFG);
-                                assert!(matches!(p, Phase::Takeable | Phase::ClosingTakeable), "C5: {c:?} {ev:?} {t:?}");
-                            }
+                        if let (Some(b), Some(a)) = (before, after)
+                            && b != a
+                        {
+                            let p = phase(c.as_ref(), t, &CFG);
+                            assert!(
+                                matches!(p, Phase::Takeable | Phase::ClosingTakeable),
+                                "C5: {c:?} {ev:?} {t:?}"
+                            );
                         }
                         // C7: a Held claim kept by the same owner and epoch never loses lease.
-                        if let (Some(Claim::Held { owner: o1, epoch: e1, expires: x1 }), Some(Claim::Held { owner: o2, epoch: e2, expires: x2 })) = (c, s.claim) {
-                            if o1 == o2 && e1 == e2 {
-                                assert!(x2 >= x1, "C7: {c:?} {ev:?}");
-                            }
+                        if let (
+                            Some(Claim::Held {
+                                owner: o1,
+                                epoch: e1,
+                                expires: x1,
+                            }),
+                            Some(Claim::Held {
+                                owner: o2,
+                                epoch: e2,
+                                expires: x2,
+                            }),
+                        ) = (c, s.claim)
+                            && o1 == o2
+                            && e1 == e2
+                        {
+                            assert!(x2 >= x1, "C7: {c:?} {ev:?}");
                         }
                         // C7: DoneAbort restores at least the lease DoneBegin saved.
-                        if let (Some(Claim::Closing { resume_expires, .. }), Some(Claim::Held { expires, .. }), ClaimEvent::DoneAbort { .. }) = (c, s.claim, ev) {
+                        if let (
+                            Some(Claim::Closing { resume_expires, .. }),
+                            Some(Claim::Held { expires, .. }),
+                            ClaimEvent::DoneAbort { .. },
+                        ) = (c, s.claim, ev)
+                        {
                             assert!(expires >= resume_expires, "C7 abort");
                         }
                         // D2: a Closed row is never granted.
@@ -590,16 +723,43 @@ mod tests {
     #[test]
     fn a_takeover_needs_lease_plus_grace_and_says_who_lost_it() {
         let (a, b) = (seat(b"s-aaaaaaaa"), seat(b"s-bbbbbbbb"));
-        let ctx = ClaimCtx { open_by_caller: 0, live_rows: 1, next_epoch: 1 };
-        let held = Some(Claim::Held { owner: a, epoch: ep(1), expires: LeaseTime(3) });
+        let ctx = ClaimCtx {
+            open_by_caller: 0,
+            live_rows: 1,
+            next_epoch: 1,
+        };
+        let held = Some(Claim::Held {
+            owner: a,
+            epoch: ep(1),
+            expires: LeaseTime(3),
+        });
         let lease_plus_grace = 3 + CFG.get().grace;
-        let early = claim_step(held, b, ClaimEvent::Claim, LeaseTime(lease_plus_grace - 1), RoomTime(0), ctx, &CFG);
+        let early = claim_step(
+            held,
+            b,
+            ClaimEvent::Claim,
+            LeaseTime(lease_plus_grace - 1),
+            RoomTime(0),
+            ctx,
+            &CFG,
+        );
         assert_eq!(early.outcome, Err(ClaimRefusal::HeldBy));
-        let late = claim_step(held, b, ClaimEvent::Claim, LeaseTime(lease_plus_grace), RoomTime(0), ctx, &CFG);
+        let late = claim_step(
+            held,
+            b,
+            ClaimEvent::Claim,
+            LeaseTime(lease_plus_grace),
+            RoomTime(0),
+            ctx,
+            &CFG,
+        );
         assert_eq!(late.outcome, Ok(ClaimReply::Granted(ep(2))));
         assert_eq!(late.news, ClaimNews::Takeover { from: a });
         // The old owner's late DoneCommit is refused.
-        let commit = ClaimEvent::DoneCommit { epoch: ep(1), sha: sha(1) };
+        let commit = ClaimEvent::DoneCommit {
+            epoch: ep(1),
+            sha: sha(1),
+        };
         let refused = claim_step(late.claim, a, commit, LeaseTime(9), RoomTime(0), ctx, &CFG);
         assert_eq!(refused.outcome, Err(ClaimRefusal::NotOwner));
     }
@@ -607,24 +767,85 @@ mod tests {
     #[test]
     fn caps_and_the_epoch_counter_are_named_refusals() {
         let a = seat(b"s-aaaaaaaa");
-        let full = ClaimCtx { open_by_caller: 0, live_rows: CFG.get().max_keys, next_epoch: 0 };
-        assert_eq!(claim_step(None, a, ClaimEvent::Claim, LeaseTime(0), RoomTime(0), full, &CFG).outcome, Err(ClaimRefusal::Full));
-        let busy = ClaimCtx { open_by_caller: CFG.get().max_claims_per_seat, live_rows: 0, next_epoch: 0 };
-        assert_eq!(claim_step(None, a, ClaimEvent::Claim, LeaseTime(0), RoomTime(0), busy, &CFG).outcome, Err(ClaimRefusal::TooManyClaims));
-        let spent = ClaimCtx { open_by_caller: 0, live_rows: 0, next_epoch: u64::MAX };
-        assert_eq!(claim_step(None, a, ClaimEvent::Claim, LeaseTime(0), RoomTime(0), spent, &CFG).outcome, Err(ClaimRefusal::Exhausted));
+        let full = ClaimCtx {
+            open_by_caller: 0,
+            live_rows: CFG.get().max_keys,
+            next_epoch: 0,
+        };
+        assert_eq!(
+            claim_step(
+                None,
+                a,
+                ClaimEvent::Claim,
+                LeaseTime(0),
+                RoomTime(0),
+                full,
+                &CFG
+            )
+            .outcome,
+            Err(ClaimRefusal::Full)
+        );
+        let busy = ClaimCtx {
+            open_by_caller: CFG.get().max_claims_per_seat,
+            live_rows: 0,
+            next_epoch: 0,
+        };
+        assert_eq!(
+            claim_step(
+                None,
+                a,
+                ClaimEvent::Claim,
+                LeaseTime(0),
+                RoomTime(0),
+                busy,
+                &CFG
+            )
+            .outcome,
+            Err(ClaimRefusal::TooManyClaims)
+        );
+        let spent = ClaimCtx {
+            open_by_caller: 0,
+            live_rows: 0,
+            next_epoch: u64::MAX,
+        };
+        assert_eq!(
+            claim_step(
+                None,
+                a,
+                ClaimEvent::Claim,
+                LeaseTime(0),
+                RoomTime(0),
+                spent,
+                &CFG
+            )
+            .outcome,
+            Err(ClaimRefusal::Exhausted)
+        );
     }
 
     #[test]
     fn the_ledger_closes_any_row_once_and_refuses_a_different_closure() {
         let a = seat(b"s-aaaaaaaa");
-        let held = Some(Claim::Held { owner: a, epoch: ep(1), expires: LeaseTime(3) });
+        let held = Some(Claim::Held {
+            owner: a,
+            epoch: ep(1),
+            expires: LeaseTime(3),
+        });
         let (row, out, lost) = ledger_observe(held, Closure::Done, sha(1), RoomTime(5), false);
         assert_eq!(out, Ok(ClaimReply::Done));
         assert_eq!(lost, Some(a));
-        assert_eq!(ledger_observe(row, Closure::Done, sha(1), RoomTime(6), false).1, Ok(ClaimReply::NoChange));
-        assert_eq!(ledger_observe(row, Closure::Dropped, sha(1), RoomTime(6), false).1, Err(ClaimRefusal::Closed));
-        assert_eq!(ledger_observe(None, Closure::Done, sha(2), RoomTime(6), true).1, Err(ClaimRefusal::Full));
+        assert_eq!(
+            ledger_observe(row, Closure::Done, sha(1), RoomTime(6), false).1,
+            Ok(ClaimReply::NoChange)
+        );
+        assert_eq!(
+            ledger_observe(row, Closure::Dropped, sha(1), RoomTime(6), false).1,
+            Err(ClaimRefusal::Closed)
+        );
+        assert_eq!(
+            ledger_observe(None, Closure::Done, sha(2), RoomTime(6), true).1,
+            Err(ClaimRefusal::Full)
+        );
         assert_eq!(admin_reopen(row).0, None);
         assert_eq!(admin_reopen(held).1, Err(ClaimRefusal::NotClosed));
     }
