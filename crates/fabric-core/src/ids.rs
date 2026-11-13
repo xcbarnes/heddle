@@ -251,7 +251,11 @@ impl ConvId {
     pub fn parse(s: &[u8]) -> Option<ConvId> {
         let arr = <[u8; 36]>::try_from(s).ok()?;
         let ok = arr.iter().enumerate().all(|(i, b)| {
-            if matches!(i, 8 | 13 | 18 | 23) { *b == b'-' } else { b.is_ascii_digit() || (b'a'..=b'f').contains(b) }
+            if matches!(i, 8 | 13 | 18 | 23) {
+                *b == b'-'
+            } else {
+                b.is_ascii_digit() || (b'a'..=b'f').contains(b)
+            }
         });
         if ok { Some(ConvId(arr)) } else { None }
     }

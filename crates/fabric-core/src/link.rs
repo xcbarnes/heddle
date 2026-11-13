@@ -36,7 +36,10 @@ pub enum Link {
 
 impl Link {
     /// A new link.
-    pub const START: Link = Link::Online { fails: 0, first_fail: None };
+    pub const START: Link = Link::Online {
+        fails: 0,
+        first_fail: None,
+    };
 }
 
 /// What a hook's call came to.
@@ -70,18 +73,34 @@ pub fn link_step(l: Link, r: CallResult, now: u64) -> Link {
                 let fails = fails.saturating_add(1);
                 let first = first_fail.unwrap_or(now);
                 if fails >= FAIL_LIMIT || now.saturating_sub(first) >= FAIL_SPAN {
-                    Link::Off { oks: 0, next_probe: now.saturating_add(PROBE_EVERY) }
+                    Link::Off {
+                        oks: 0,
+                        next_probe: now.saturating_add(PROBE_EVERY),
+                    }
                 } else {
-                    Link::Online { fails, first_fail: Some(first) }
+                    Link::Online {
+                        fails,
+                        first_fail: Some(first),
+                    }
                 }
             }
         },
         Link::Off { oks, .. } => match r {
             CallResult::NotCalled => l,
-            CallResult::Failed => Link::Off { oks: 0, next_probe: now.saturating_add(PROBE_EVERY) },
+            CallResult::Failed => Link::Off {
+                oks: 0,
+                next_probe: now.saturating_add(PROBE_EVERY),
+            },
             CallResult::Verified | CallResult::Refused4xx => {
                 let oks = oks.saturating_add(1);
-                if oks >= OK_LIMIT { Link::START } else { Link::Off { oks, next_probe: now } }
+                if oks >= OK_LIMIT {
+                    Link::START
+                } else {
+                    Link::Off {
+                        oks,
+                        next_probe: now,
+                    }
+                }
             }
         },
     }
@@ -95,7 +114,10 @@ mod tests {
     #[test]
     fn n2_one_slow_or_failed_reply_does_not_switch_fabric_off() {
         for t in [0, 1, 9_999, u64::MAX] {
-            assert!(matches!(link_step(Link::START, CallResult::Failed, t), Link::Online { .. }));
+            assert!(matches!(
+                link_step(Link::START, CallResult::Failed, t),
+                Link::Online { .. }
+            ));
         }
     }
 
@@ -104,7 +126,11 @@ mod tests {
         let mut l = Link::START;
         let mut moves_off = 0;
         for t in (0..120_000u64).step_by(500) {
-            let r = if may_call(&l, t) { CallResult::Failed } else { CallResult::NotCalled };
+            let r = if may_call(&l, t) {
+                CallResult::Failed
+            } else {
+                CallResult::NotCalled
+            };
             let next = link_step(l, r, t);
             if matches!(l, Link::Online { .. }) && matches!(next, Link::Off { .. }) {
                 moves_off += 1;
@@ -116,12 +142,21 @@ mod tests {
 
     #[test]
     fn off_needs_two_answers_and_probes_at_most_every_ten_seconds() {
-        let off = Link::Off { oks: 0, next_probe: 10_000 };
+        let off = Link::Off {
+            oks: 0,
+            next_probe: 10_000,
+        };
         assert!(!may_call(&off, 9_999));
         assert!(may_call(&off, 10_000));
         let once = link_step(off, CallResult::Verified, 10_000);
         assert!(matches!(once, Link::Off { oks: 1, .. }));
         assert_eq!(link_step(once, CallResult::Refused4xx, 10_001), Link::START);
-        assert_eq!(link_step(once, CallResult::Failed, 10_001), Link::Off { oks: 0, next_probe: 20_001 });
+        assert_eq!(
+            link_step(once, CallResult::Failed, 10_001),
+            Link::Off {
+                oks: 0,
+                next_probe: 20_001
+            }
+        );
     }
 }

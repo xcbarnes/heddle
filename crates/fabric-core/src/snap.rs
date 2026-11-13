@@ -65,7 +65,12 @@ pub struct Trust {
 
 impl Trust {
     /// Before any snapshot.
-    pub const START: Trust = Trust { generation: 0, high_seq: 0, sticky: Level::Running, registry_seen: 0 };
+    pub const START: Trust = Trust {
+        generation: 0,
+        high_seq: 0,
+        sticky: Level::Running,
+        registry_seen: 0,
+    };
 }
 
 /// Whether a snapshot at `(generation, seq)` may be accepted (S2): it is not
@@ -82,7 +87,12 @@ pub fn observe(t: Trust, generation: u32, seq: u64, level: Level, live: bool) ->
     let key = (generation, seq);
     let have = (t.generation, t.high_seq);
     if key > have || (key == have && live) {
-        Trust { generation, high_seq: seq, sticky: level, registry_seen: t.registry_seen }
+        Trust {
+            generation,
+            high_seq: seq,
+            sticky: level,
+            registry_seen: t.registry_seen,
+        }
     } else {
         t
     }
@@ -98,9 +108,15 @@ pub fn join(a: Trust, b: Trust) -> Trust {
     } else if ka > kb {
         a
     } else {
-        Trust { sticky: a.sticky.max(b.sticky), ..a }
+        Trust {
+            sticky: a.sticky.max(b.sticky),
+            ..a
+        }
     };
-    Trust { registry_seen: a.registry_seen.max(b.registry_seen), ..base }
+    Trust {
+        registry_seen: a.registry_seen.max(b.registry_seen),
+        ..base
+    }
 }
 
 #[cfg(test)]
@@ -115,9 +131,21 @@ mod tests {
     #[test]
     fn age_takes_the_larger_clock_and_a_clock_that_went_back_is_too_old() {
         assert_eq!(age_ms(at(100, 100), at(200, 150)), Some(100));
-        assert_eq!(age_ms(at(100, 100), at(150, 700)), Some(600), "a sleep shows on the monotonic clock");
-        assert_eq!(snap_state(Some(at(100, 100)), at(50, 200)), SnapState::TooOld, "wall clock stepped back");
-        assert_eq!(snap_state(Some(at(100, 100)), at(200, 50)), SnapState::TooOld, "a reboot reset the monotonic clock");
+        assert_eq!(
+            age_ms(at(100, 100), at(150, 700)),
+            Some(600),
+            "a sleep shows on the monotonic clock"
+        );
+        assert_eq!(
+            snap_state(Some(at(100, 100)), at(50, 200)),
+            SnapState::TooOld,
+            "wall clock stepped back"
+        );
+        assert_eq!(
+            snap_state(Some(at(100, 100)), at(200, 50)),
+            SnapState::TooOld,
+            "a reboot reset the monotonic clock"
+        );
         assert_eq!(snap_state(None, at(0, 0)), SnapState::Missing);
     }
 
@@ -127,26 +155,56 @@ mod tests {
         assert_eq!(snap_state(Some(g), at(FRESH - 1, 0)), SnapState::Fresh);
         assert_eq!(snap_state(Some(g), at(FRESH, 0)), SnapState::Aging);
         assert_eq!(snap_state(Some(g), at(EVIDENCE_MAX, 0)), SnapState::Aging);
-        assert_eq!(snap_state(Some(g), at(EVIDENCE_MAX + 1, 0)), SnapState::TooOld);
+        assert_eq!(
+            snap_state(Some(g), at(EVIDENCE_MAX + 1, 0)),
+            SnapState::TooOld
+        );
     }
 
     #[test]
     fn p7_s2_an_old_or_equal_cached_snapshot_never_lowers_the_sticky_level() {
         let t = observe(Trust::START, 1, 10, Level::Stopped, false);
-        assert_eq!(observe(t, 1, 9, Level::Running, true).sticky, Level::Stopped);
-        assert_eq!(observe(t, 1, 10, Level::Running, false).sticky, Level::Stopped);
-        assert_eq!(observe(t, 1, 10, Level::Paused, true).sticky, Level::Paused, "decay, said live");
-        assert_eq!(observe(t, 2, 0, Level::Running, false).sticky, Level::Running, "a restore bumps the generation");
+        assert_eq!(
+            observe(t, 1, 9, Level::Running, true).sticky,
+            Level::Stopped
+        );
+        assert_eq!(
+            observe(t, 1, 10, Level::Running, false).sticky,
+            Level::Stopped
+        );
+        assert_eq!(
+            observe(t, 1, 10, Level::Paused, true).sticky,
+            Level::Paused,
+            "decay, said live"
+        );
+        assert_eq!(
+            observe(t, 2, 0, Level::Running, false).sticky,
+            Level::Running,
+            "a restore bumps the generation"
+        );
         assert!(!not_older(&t, 1, 9));
         assert!(not_older(&t, 2, 0));
     }
 
     #[test]
     fn l1_the_join_of_two_writes_keeps_the_newer_room_state() {
-        let a = Trust { generation: 1, high_seq: 5, sticky: Level::Stopped, registry_seen: 3 };
-        let b = Trust { generation: 1, high_seq: 4, sticky: Level::Running, registry_seen: 7 };
+        let a = Trust {
+            generation: 1,
+            high_seq: 5,
+            sticky: Level::Stopped,
+            registry_seen: 3,
+        };
+        let b = Trust {
+            generation: 1,
+            high_seq: 4,
+            sticky: Level::Running,
+            registry_seen: 7,
+        };
         let j = join(a, b);
-        assert_eq!((j.high_seq, j.sticky, j.registry_seen), (5, Level::Stopped, 7));
+        assert_eq!(
+            (j.high_seq, j.sticky, j.registry_seen),
+            (5, Level::Stopped, 7)
+        );
         assert_eq!(join(a, b), join(b, a));
     }
 }

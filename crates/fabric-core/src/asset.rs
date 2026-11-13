@@ -38,7 +38,11 @@ pub enum IllegalTags {
 }
 
 /// The class, from the three tags (A1).
-pub fn classify(may_contain_phi: bool, phi_safe: bool, never_safe: bool) -> Result<AssetClass, IllegalTags> {
+pub fn classify(
+    may_contain_phi: bool,
+    phi_safe: bool,
+    never_safe: bool,
+) -> Result<AssetClass, IllegalTags> {
     match (may_contain_phi, phi_safe, never_safe) {
         (true, false, _) => Err(IllegalTags::PhiNotSafe),
         (_, true, true) => Err(IllegalTags::SafeAndNeverSafe),
@@ -157,9 +161,13 @@ pub fn flow(src: Subject, op: Op, dst: &AssetView, today: Date) -> Flow {
         | Subject::System(AssetClass::Open)
         | Subject::System(AssetClass::Walled)
         | Subject::System(AssetClass::SafeClean) => match (class, op) {
-            (AssetClass::Open | AssetClass::Walled, Op::PullById | Op::Query | Op::Push) => Flow::Allow,
+            (AssetClass::Open | AssetClass::Walled, Op::PullById | Op::Query | Op::Push) => {
+                Flow::Allow
+            }
             (AssetClass::SafeClean, Op::PullById) => Flow::AllowById,
-            (AssetClass::SafeClean | AssetClass::SafeBearing, Op::Query) => Flow::Deny(DenyReason::NoCredential),
+            (AssetClass::SafeClean | AssetClass::SafeBearing, Op::Query) => {
+                Flow::Deny(DenyReason::NoCredential)
+            }
             (AssetClass::SafeBearing, Op::PullById) => Flow::Deny(DenyReason::NoCredential),
             (AssetClass::SafeClean | AssetClass::SafeBearing, Op::Push) => Flow::DestinationPulls,
         },
@@ -175,7 +183,9 @@ pub fn flow(src: Subject, op: Op, dst: &AssetView, today: Date) -> Flow {
         // sending is allowed only to another SafeBearing asset.
         Subject::System(AssetClass::SafeBearing) => match (class, op) {
             (AssetClass::Open | AssetClass::Walled, Op::PullById) => Flow::AllowById,
-            (AssetClass::Open | AssetClass::Walled, Op::Query | Op::Push) => Flow::Deny(DenyReason::QueriesCount),
+            (AssetClass::Open | AssetClass::Walled, Op::Query | Op::Push) => {
+                Flow::Deny(DenyReason::QueriesCount)
+            }
             (AssetClass::SafeClean, Op::PullById | Op::Query) => Flow::Allow,
             (AssetClass::SafeClean, Op::Push) => Flow::Deny(DenyReason::RetagFirst),
             (AssetClass::SafeBearing, Op::PullById | Op::Query | Op::Push) => Flow::Allow,
@@ -188,21 +198,35 @@ mod tests {
     use super::*;
     use alloc::vec::Vec;
 
-    const CLASSES: [AssetClass; 4] = [AssetClass::Open, AssetClass::Walled, AssetClass::SafeClean, AssetClass::SafeBearing];
+    const CLASSES: [AssetClass; 4] = [
+        AssetClass::Open,
+        AssetClass::Walled,
+        AssetClass::SafeClean,
+        AssetClass::SafeBearing,
+    ];
 
     fn subjects() -> Vec<Subject> {
-        let mut v = alloc::vec![Subject::Thread(ThreadPool::PhiFree), Subject::Thread(ThreadPool::PhiSafe)];
+        let mut v = alloc::vec![
+            Subject::Thread(ThreadPool::PhiFree),
+            Subject::Thread(ThreadPool::PhiSafe)
+        ];
         v.extend(CLASSES.iter().map(|c| Subject::System(*c)));
         v
     }
 
     fn destinations() -> Vec<AssetView> {
         let mut v = Vec::new();
-        let vettings = [Vetting::Unvetted].into_iter().chain(CLASSES.iter().map(|c| Vetting::Classed(*c)));
+        let vettings = [Vetting::Unvetted]
+            .into_iter()
+            .chain(CLASSES.iter().map(|c| Vetting::Classed(*c)));
         for vetting in vettings {
             for incident in [false, true] {
                 for baa_expires in [None, Some(Date(9)), Some(Date(11))] {
-                    v.push(AssetView { vetting, incident, baa_expires });
+                    v.push(AssetView {
+                        vetting,
+                        incident,
+                        baa_expires,
+                    });
                 }
             }
         }
@@ -211,7 +235,10 @@ mod tests {
 
     /// Where PHI-derived data can already be.
     fn tainted_subject(s: Subject) -> bool {
-        matches!(s, Subject::Thread(ThreadPool::PhiSafe) | Subject::System(AssetClass::SafeBearing))
+        matches!(
+            s,
+            Subject::Thread(ThreadPool::PhiSafe) | Subject::System(AssetClass::SafeBearing)
+        )
     }
     fn tainted_asset(a: &AssetView) -> bool {
         a.vetting == Vetting::Classed(AssetClass::SafeBearing)
@@ -221,7 +248,12 @@ mod tests {
         !tainted_subject(s) && !matches!(s, Subject::System(AssetClass::SafeClean))
     }
     fn clean_side_asset(a: &AssetView) -> bool {
-        matches!(a.vetting, Vetting::Unvetted | Vetting::Classed(AssetClass::Open) | Vetting::Classed(AssetClass::Walled))
+        matches!(
+            a.vetting,
+            Vetting::Unvetted
+                | Vetting::Classed(AssetClass::Open)
+                | Vetting::Classed(AssetClass::Walled)
+        )
     }
 
     #[test]
@@ -230,7 +262,11 @@ mod tests {
             for safe in [false, true] {
                 for never in [false, true] {
                     let c = classify(phi, safe, never);
-                    assert_eq!(c.is_err(), (phi && !safe) || (safe && never), "{phi} {safe} {never}");
+                    assert_eq!(
+                        c.is_err(),
+                        (phi && !safe) || (safe && never),
+                        "{phi} {safe} {never}"
+                    );
                     if let Ok(AssetClass::Open | AssetClass::Walled) = c {
                         assert!(!phi);
                     }
@@ -283,7 +319,8 @@ mod tests {
             for op in [Op::PullById, Op::Query, Op::Push] {
                 for d in destinations() {
                     let f = flow(s, op, &d, today);
-                    let quarantined = d.incident && clean_side_asset(&d) && d.vetting != Vetting::Unvetted;
+                    let quarantined =
+                        d.incident && clean_side_asset(&d) && d.vetting != Vetting::Unvetted;
                     let lapsed = !clean_side_asset(&d) && d.baa_expires.is_some_and(|x| x < today);
                     if d.vetting == Vetting::Unvetted {
                         assert_eq!(f, Flow::Deny(DenyReason::Unvetted));
@@ -295,7 +332,19 @@ mod tests {
                 }
             }
         }
-        let clean = AssetView { vetting: Vetting::Classed(AssetClass::SafeClean), incident: false, baa_expires: None };
-        assert_eq!(flow(Subject::Thread(ThreadPool::PhiSafe), Op::Push, &clean, today), Flow::Deny(DenyReason::RetagFirst));
+        let clean = AssetView {
+            vetting: Vetting::Classed(AssetClass::SafeClean),
+            incident: false,
+            baa_expires: None,
+        };
+        assert_eq!(
+            flow(
+                Subject::Thread(ThreadPool::PhiSafe),
+                Op::Push,
+                &clean,
+                today
+            ),
+            Flow::Deny(DenyReason::RetagFirst)
+        );
     }
 }

@@ -132,7 +132,9 @@ impl Scrubbed {
     /// The checked constructor. A rewind record cannot be built without one.
     pub fn parse(s: &[u8]) -> Option<Scrubbed> {
         let arr = <[u8; 8]>::try_from(s).ok()?;
-        let ok = arr.iter().all(|b| b"0123456789abcdefghjkmnpqrstvwxyz".contains(b));
+        let ok = arr
+            .iter()
+            .all(|b| b"0123456789abcdefghjkmnpqrstvwxyz".contains(b));
         if ok { Some(Scrubbed(arr)) } else { None }
     }
     /// The code's bytes.
@@ -290,20 +292,46 @@ const NONE: PhiEffects = PhiEffects {
 };
 
 fn exposed(incident: IncidentId, cause: Cause) -> Phi {
-    Phi::Exposed { incident, cause, hits: 1, acked: false }
+    Phi::Exposed {
+        incident,
+        cause,
+        hits: 1,
+        acked: false,
+    }
 }
 
-fn brake(incident: IncidentId, cause: Cause, rule: Option<RuleId>, fx: PhiEffects) -> (Phi, PhiEffects) {
-    let fx = PhiEffects { taint: Some((incident, cause)), quarantine: Some(incident), count: rule, ..fx };
+fn brake(
+    incident: IncidentId,
+    cause: Cause,
+    rule: Option<RuleId>,
+    fx: PhiEffects,
+) -> (Phi, PhiEffects) {
+    let fx = PhiEffects {
+        taint: Some((incident, cause)),
+        quarantine: Some(incident),
+        count: rule,
+        ..fx
+    };
     (exposed(incident, cause), fx)
 }
 
 /// What a hit does to a label that is already Exposed: count it.
 fn another_hit(p: Phi, rule: Option<RuleId>, fx: PhiEffects) -> (Phi, PhiEffects) {
     match p {
-        Phi::Exposed { incident, cause, hits, acked } => {
-            (Phi::Exposed { incident, cause, hits: hits.saturating_add(1), acked }, PhiEffects { count: rule, ..fx })
-        }
+        Phi::Exposed {
+            incident,
+            cause,
+            hits,
+            acked,
+        } => (
+            Phi::Exposed {
+                incident,
+                cause,
+                hits: hits.saturating_add(1),
+                acked,
+            },
+            PhiEffects { count: rule, ..fx },
+        ),
         Phi::Clean | Phi::Held | Phi::Sealed { .. } => (p, PhiEffects { count: rule, ..fx }),
     }
 }
@@ -315,12 +343,26 @@ pub fn phi_step(p: Phi, ev: PhiEvent) -> (Phi, PhiEffects) {
     }
     let open = matches!(p, Phi::Clean | Phi::Held);
     match ev {
-        PhiEvent::PromptHit { rule, person_typed, incident } => {
-            let fx = PhiEffects { block_prompt: true, ..NONE };
+        PhiEvent::PromptHit {
+            rule,
+            person_typed,
+            incident,
+        } => {
+            let fx = PhiEffects {
+                block_prompt: true,
+                ..NONE
+            };
             if !open {
                 another_hit(p, Some(rule), fx)
             } else if person_typed {
-                (Phi::Held, PhiEffects { residue: true, count: Some(rule), ..fx })
+                (
+                    Phi::Held,
+                    PhiEffects {
+                        residue: true,
+                        count: Some(rule),
+                        ..fx
+                    },
+                )
             } else {
                 brake(incident, Cause::FoundLater, Some(rule), fx)
             }
@@ -329,8 +371,18 @@ pub fn phi_step(p: Phi, ev: PhiEvent) -> (Phi, PhiEffects) {
             Phi::Held => (Phi::Clean, NONE),
             Phi::Clean | Phi::Exposed { .. } | Phi::Sealed { .. } => (p, NONE),
         },
-        PhiEvent::ResultHit { rule, can_replace, can_stop, passed_model, incident } => {
-            let fx = PhiEffects { replace_result: can_replace, stop_loop: can_stop, ..NONE };
+        PhiEvent::ResultHit {
+            rule,
+            can_replace,
+            can_stop,
+            passed_model,
+            incident,
+        } => {
+            let fx = PhiEffects {
+                replace_result: can_replace,
+                stop_loop: can_stop,
+                ..NONE
+            };
             if !open {
                 return another_hit(p, Some(rule), fx);
             }
@@ -343,47 +395,141 @@ pub fn phi_step(p: Phi, ev: PhiEvent) -> (Phi, PhiEffects) {
             } else {
                 Cause::FoundLater
             };
-            brake(incident, cause, Some(rule), PhiEffects { source_incident: Some(incident), ..fx })
+            brake(
+                incident,
+                cause,
+                Some(rule),
+                PhiEffects {
+                    source_incident: Some(incident),
+                    ..fx
+                },
+            )
         }
         PhiEvent::BatchHit { rule, incident } => {
-            let fx = PhiEffects { stop_loop: true, ..NONE };
-            if open { brake(incident, Cause::BatchUnsent, Some(rule), fx) } else { another_hit(p, Some(rule), fx) }
+            let fx = PhiEffects {
+                stop_loop: true,
+                ..NONE
+            };
+            if open {
+                brake(incident, Cause::BatchUnsent, Some(rule), fx)
+            } else {
+                another_hit(p, Some(rule), fx)
+            }
         }
         PhiEvent::ToolInputHit { rule, incident } => {
-            let fx = PhiEffects { deny_call: true, ..NONE };
-            if open { brake(incident, Cause::ToolInput, Some(rule), fx) } else { another_hit(p, Some(rule), fx) }
+            let fx = PhiEffects {
+                deny_call: true,
+                ..NONE
+            };
+            if open {
+                brake(incident, Cause::ToolInput, Some(rule), fx)
+            } else {
+                another_hit(p, Some(rule), fx)
+            }
         }
         PhiEvent::TranscriptHit { rule, incident } => {
-            if open { brake(incident, Cause::FoundLater, Some(rule), NONE) } else { another_hit(p, Some(rule), NONE) }
+            if open {
+                brake(incident, Cause::FoundLater, Some(rule), NONE)
+            } else {
+                another_hit(p, Some(rule), NONE)
+            }
         }
         PhiEvent::Flag { incident } => {
-            if open { brake(incident, Cause::FoundLater, None, NONE) } else { another_hit(p, None, NONE) }
+            if open {
+                brake(incident, Cause::FoundLater, None, NONE)
+            } else {
+                another_hit(p, None, NONE)
+            }
         }
         PhiEvent::RoomSaysExposed { incident, cause } => {
             if open {
-                (Phi::Exposed { incident, cause, hits: 1, acked: true }, PhiEffects { quarantine: Some(incident), ..NONE })
+                (
+                    Phi::Exposed {
+                        incident,
+                        cause,
+                        hits: 1,
+                        acked: true,
+                    },
+                    PhiEffects {
+                        quarantine: Some(incident),
+                        ..NONE
+                    },
+                )
             } else {
                 (p, NONE)
             }
         }
-        PhiEvent::RoomSaysSealed => (Phi::Sealed { reason: SealReason::Confirmed }, PhiEffects { conv_sealed: true, ..NONE }),
+        PhiEvent::RoomSaysSealed => (
+            Phi::Sealed {
+                reason: SealReason::Confirmed,
+            },
+            PhiEffects {
+                conv_sealed: true,
+                ..NONE
+            },
+        ),
         PhiEvent::TaintAcked { incident: seen } => match p {
-            Phi::Exposed { incident, cause, hits, .. } if incident == seen => {
-                (Phi::Exposed { incident, cause, hits, acked: true }, NONE)
-            }
+            Phi::Exposed {
+                incident,
+                cause,
+                hits,
+                ..
+            } if incident == seen => (
+                Phi::Exposed {
+                    incident,
+                    cause,
+                    hits,
+                    acked: true,
+                },
+                NONE,
+            ),
             Phi::Exposed { .. } | Phi::Clean | Phi::Held | Phi::Sealed { .. } => (p, NONE),
         },
-        PhiEvent::RecordSeen { incident: seen, record, upto, fresh } => match p {
+        PhiEvent::RecordSeen {
+            incident: seen,
+            record,
+            upto,
+            fresh,
+        } => match p {
             // RecordSeen fires only for exactly the local incident id.
-            Phi::Exposed { incident, cause, hits, .. } if incident == seen => match record {
-                SeenRecord::Confirmed => {
-                    (Phi::Sealed { reason: SealReason::Confirmed }, PhiEffects { conv_sealed: true, ..NONE })
-                }
-                SeenRecord::Rewound if hits <= upto => (Phi::Clean, PhiEffects { conv_rewound: true, ..NONE }),
+            Phi::Exposed {
+                incident,
+                cause,
+                hits,
+                ..
+            } if incident == seen => match record {
+                SeenRecord::Confirmed => (
+                    Phi::Sealed {
+                        reason: SealReason::Confirmed,
+                    },
+                    PhiEffects {
+                        conv_sealed: true,
+                        ..NONE
+                    },
+                ),
+                SeenRecord::Rewound if hits <= upto => (
+                    Phi::Clean,
+                    PhiEffects {
+                        conv_rewound: true,
+                        ..NONE
+                    },
+                ),
                 SeenRecord::Rewound => {
                     let left = hits.saturating_sub(upto);
-                    let next = Phi::Exposed { incident: fresh, cause, hits: left, acked: false };
-                    (next, PhiEffects { taint: Some((fresh, cause)), quarantine: Some(fresh), ..NONE })
+                    let next = Phi::Exposed {
+                        incident: fresh,
+                        cause,
+                        hits: left,
+                        acked: false,
+                    };
+                    (
+                        next,
+                        PhiEffects {
+                            taint: Some((fresh, cause)),
+                            quarantine: Some(fresh),
+                            ..NONE
+                        },
+                    )
                 }
             },
             Phi::Exposed { .. } | Phi::Clean | Phi::Held | Phi::Sealed { .. } => (p, NONE),
@@ -394,7 +540,12 @@ pub fn phi_step(p: Phi, ev: PhiEvent) -> (Phi, PhiEffects) {
 /// At every hook while Exposed and not acknowledged, resend `Taint` (T10).
 pub fn resend(p: &Phi) -> Option<(IncidentId, Cause)> {
     match p {
-        Phi::Exposed { incident, cause, acked: false, .. } => Some((*incident, *cause)),
+        Phi::Exposed {
+            incident,
+            cause,
+            acked: false,
+            ..
+        } => Some((*incident, *cause)),
         Phi::Exposed { .. } | Phi::Clean | Phi::Held | Phi::Sealed { .. } => None,
     }
 }
@@ -466,7 +617,11 @@ pub enum RecordRefusal {
 
 /// `Admin RecordPhi`, for an existing seat. The room cannot see a rewind; it
 /// checks the incident, the cause and that a rewind carries a scrub code.
-pub fn room_record(p: SeatPhi, incident: IncidentId, record: ExitRecord) -> Result<SeatPhi, RecordRefusal> {
+pub fn room_record(
+    p: SeatPhi,
+    incident: IncidentId,
+    record: ExitRecord,
+) -> Result<SeatPhi, RecordRefusal> {
     match p {
         SeatPhi::Clean => Err(RecordRefusal::NotExposed),
         SeatPhi::Sealed => Err(RecordRefusal::AlreadySealed),
@@ -485,9 +640,16 @@ pub fn room_record(p: SeatPhi, incident: IncidentId, record: ExitRecord) -> Resu
 /// `Taint` for a Clean seat whose last exit record is not for this incident
 /// moves it to Exposed; anything else is `NoChange` (the event is idempotent).
 /// The room then frees every claim the seat holds.
-pub fn room_taint(p: SeatPhi, last_record: Option<IncidentId>, incident: IncidentId, cause: Cause) -> Option<SeatPhi> {
+pub fn room_taint(
+    p: SeatPhi,
+    last_record: Option<IncidentId>,
+    incident: IncidentId,
+    cause: Cause,
+) -> Option<SeatPhi> {
     match p {
-        SeatPhi::Clean if last_record != Some(incident) => Some(SeatPhi::Exposed { incident, cause }),
+        SeatPhi::Clean if last_record != Some(incident) => {
+            Some(SeatPhi::Exposed { incident, cause })
+        }
         SeatPhi::Clean | SeatPhi::Exposed { .. } | SeatPhi::Sealed => None,
     }
 }
@@ -526,9 +688,18 @@ pub enum SourceIncident {
 }
 
 /// Q1: an incident closes only through a recorded exit for the same id.
-pub fn source_step(s: SourceIncident, seen: IncidentId, record: SeenRecord, real: bool) -> SourceIncident {
+pub fn source_step(
+    s: SourceIncident,
+    seen: IncidentId,
+    record: SeenRecord,
+    real: bool,
+) -> SourceIncident {
     match s {
-        SourceIncident::Open { inc, source } if inc == seen => SourceIncident::Recorded { source, record, real },
+        SourceIncident::Open { inc, source } if inc == seen => SourceIncident::Recorded {
+            source,
+            record,
+            real,
+        },
         SourceIncident::Open { .. } | SourceIncident::Recorded { .. } => s,
     }
 }
@@ -538,7 +709,11 @@ pub fn source_step(s: SourceIncident, seen: IncidentId, record: SeenRecord, real
 pub fn source_denied(s: &SourceIncident) -> bool {
     match s {
         SourceIncident::Open { source, .. } => !matches!(source, SourceKey::Unknown),
-        SourceIncident::Recorded { record: SeenRecord::Rewound, real: false, .. } => false,
+        SourceIncident::Recorded {
+            record: SeenRecord::Rewound,
+            real: false,
+            ..
+        } => false,
         SourceIncident::Recorded { source, .. } => !matches!(source, SourceKey::Unknown),
     }
 }
@@ -554,11 +729,27 @@ mod tests {
     }
 
     fn labels() -> Vec<Phi> {
-        let mut v = alloc::vec![Phi::Clean, Phi::Held, Phi::Sealed { reason: SealReason::Confirmed }];
-        for cause in [Cause::ResultMasked, Cause::BatchUnsent, Cause::ToolInput, Cause::FoundLater] {
+        let mut v = alloc::vec![
+            Phi::Clean,
+            Phi::Held,
+            Phi::Sealed {
+                reason: SealReason::Confirmed
+            }
+        ];
+        for cause in [
+            Cause::ResultMasked,
+            Cause::BatchUnsent,
+            Cause::ToolInput,
+            Cause::FoundLater,
+        ] {
             for hits in [1, 2, u16::MAX] {
                 for acked in [false, true] {
-                    v.push(Phi::Exposed { incident: inc(b"inc-aaaaaa"), cause, hits, acked });
+                    v.push(Phi::Exposed {
+                        incident: inc(b"inc-aaaaaa"),
+                        cause,
+                        hits,
+                        acked,
+                    });
                 }
             }
         }
@@ -571,19 +762,35 @@ mod tests {
         let mut v = alloc::vec![
             PhiEvent::PromptClean,
             PhiEvent::Flag { incident: i },
-            PhiEvent::RoomSaysExposed { incident: i, cause: Cause::FoundLater },
+            PhiEvent::RoomSaysExposed {
+                incident: i,
+                cause: Cause::FoundLater
+            },
             PhiEvent::RoomSaysSealed,
             PhiEvent::TaintAcked { incident: a },
             PhiEvent::TaintAcked { incident: i },
         ];
         for rule in [RuleId::R00, RuleId::R01, RuleId::R10] {
             for person_typed in [false, true] {
-                v.push(PhiEvent::PromptHit { rule, person_typed, incident: i });
+                v.push(PhiEvent::PromptHit {
+                    rule,
+                    person_typed,
+                    incident: i,
+                });
             }
-            for (can_replace, can_stop, passed_model) in
-                [(true, true, false), (false, true, false), (false, false, false), (true, true, true)]
-            {
-                v.push(PhiEvent::ResultHit { rule, can_replace, can_stop, passed_model, incident: i });
+            for (can_replace, can_stop, passed_model) in [
+                (true, true, false),
+                (false, true, false),
+                (false, false, false),
+                (true, true, true),
+            ] {
+                v.push(PhiEvent::ResultHit {
+                    rule,
+                    can_replace,
+                    can_stop,
+                    passed_model,
+                    incident: i,
+                });
             }
             v.push(PhiEvent::BatchHit { rule, incident: i });
             v.push(PhiEvent::ToolInputHit { rule, incident: i });
@@ -592,7 +799,12 @@ mod tests {
         for record in [SeenRecord::Rewound, SeenRecord::Confirmed] {
             for upto in [0, 1, 2, u16::MAX] {
                 for seen in [a, i] {
-                    v.push(PhiEvent::RecordSeen { incident: seen, record, upto, fresh: inc(b"inc-cccccc") });
+                    v.push(PhiEvent::RecordSeen {
+                        incident: seen,
+                        record,
+                        upto,
+                        fresh: inc(b"inc-cccccc"),
+                    });
                 }
             }
         }
@@ -620,7 +832,12 @@ mod tests {
                         // T2: Exposed to Clean on a rewind record for exactly this incident.
                         (
                             Phi::Exposed { incident, hits, .. },
-                            PhiEvent::RecordSeen { incident: seen, record: SeenRecord::Rewound, upto, .. },
+                            PhiEvent::RecordSeen {
+                                incident: seen,
+                                record: SeenRecord::Rewound,
+                                upto,
+                                ..
+                            },
                         ) => incident == seen && hits <= upto && q == Phi::Clean,
                         _ => false,
                     };
@@ -638,13 +855,39 @@ mod tests {
         let i = inc(b"inc-bbbbbb");
         for p in labels() {
             for person_typed in [false, true] {
-                let fault = phi_step(p, PhiEvent::PromptHit { rule: RuleId::R00, person_typed, incident: i });
-                let hit = phi_step(p, PhiEvent::PromptHit { rule: RuleId::R01, person_typed, incident: i });
+                let fault = phi_step(
+                    p,
+                    PhiEvent::PromptHit {
+                        rule: RuleId::R00,
+                        person_typed,
+                        incident: i,
+                    },
+                );
+                let hit = phi_step(
+                    p,
+                    PhiEvent::PromptHit {
+                        rule: RuleId::R01,
+                        person_typed,
+                        incident: i,
+                    },
+                );
                 assert_eq!(fault.0, hit.0);
                 assert_eq!(fault.1.block_prompt, hit.1.block_prompt);
             }
-            let fault = phi_step(p, PhiEvent::ToolInputHit { rule: RuleId::R00, incident: i });
-            let hit = phi_step(p, PhiEvent::ToolInputHit { rule: RuleId::R03, incident: i });
+            let fault = phi_step(
+                p,
+                PhiEvent::ToolInputHit {
+                    rule: RuleId::R00,
+                    incident: i,
+                },
+            );
+            let hit = phi_step(
+                p,
+                PhiEvent::ToolInputHit {
+                    rule: RuleId::R03,
+                    incident: i,
+                },
+            );
             assert_eq!((fault.0, fault.1.deny_call), (hit.0, hit.1.deny_call));
         }
     }
@@ -654,7 +897,13 @@ mod tests {
         for p in [Phi::Clean, Phi::Held] {
             for ev in events() {
                 let (q, fx) = phi_step(p, ev);
-                let typed = matches!(ev, PhiEvent::PromptHit { person_typed: true, .. });
+                let typed = matches!(
+                    ev,
+                    PhiEvent::PromptHit {
+                        person_typed: true,
+                        ..
+                    }
+                );
                 let hit = matches!(
                     ev,
                     PhiEvent::PromptHit { .. }
@@ -679,10 +928,28 @@ mod tests {
     fn a_hit_after_the_admin_looked_reopens_under_a_new_incident() {
         let a = inc(b"inc-aaaaaa");
         let c = inc(b"inc-cccccc");
-        let p = Phi::Exposed { incident: a, cause: Cause::ResultMasked, hits: 3, acked: true };
-        let ev = PhiEvent::RecordSeen { incident: a, record: SeenRecord::Rewound, upto: 2, fresh: c };
+        let p = Phi::Exposed {
+            incident: a,
+            cause: Cause::ResultMasked,
+            hits: 3,
+            acked: true,
+        };
+        let ev = PhiEvent::RecordSeen {
+            incident: a,
+            record: SeenRecord::Rewound,
+            upto: 2,
+            fresh: c,
+        };
         let (q, fx) = phi_step(p, ev);
-        assert_eq!(q, Phi::Exposed { incident: c, cause: Cause::ResultMasked, hits: 1, acked: false });
+        assert_eq!(
+            q,
+            Phi::Exposed {
+                incident: c,
+                cause: Cause::ResultMasked,
+                hits: 1,
+                acked: false
+            }
+        );
         assert_eq!(fx.taint, Some((c, Cause::ResultMasked)));
     }
 
@@ -690,40 +957,101 @@ mod tests {
     fn t9_the_room_refuses_a_rewind_of_real_data_a_vendor_holds() {
         let a = inc(b"inc-aaaaaa");
         let scrub = Scrubbed::parse(b"k3q9x2ab").expect("a code");
-        for cause in [Cause::ResultMasked, Cause::BatchUnsent, Cause::ToolInput, Cause::FoundLater] {
+        for cause in [
+            Cause::ResultMasked,
+            Cause::BatchUnsent,
+            Cause::ToolInput,
+            Cause::FoundLater,
+        ] {
             let p = SeatPhi::Exposed { incident: a, cause };
             let real = room_record(p, a, ExitRecord::Rewound { scrub, real: true });
             let vendor_holds = matches!(cause, Cause::ToolInput | Cause::FoundLater);
             assert_eq!(real.is_err(), vendor_holds, "{cause:?}");
-            assert_eq!(room_record(p, a, ExitRecord::Rewound { scrub, real: false }), Ok(SeatPhi::Clean));
-            assert_eq!(room_record(p, a, ExitRecord::Confirmed), Ok(SeatPhi::Sealed));
-            assert_eq!(room_record(p, inc(b"inc-zzzzzz"), ExitRecord::Confirmed), Err(RecordRefusal::WrongIncident));
+            assert_eq!(
+                room_record(p, a, ExitRecord::Rewound { scrub, real: false }),
+                Ok(SeatPhi::Clean)
+            );
+            assert_eq!(
+                room_record(p, a, ExitRecord::Confirmed),
+                Ok(SeatPhi::Sealed)
+            );
+            assert_eq!(
+                room_record(p, inc(b"inc-zzzzzz"), ExitRecord::Confirmed),
+                Err(RecordRefusal::WrongIncident)
+            );
         }
-        assert_eq!(room_record(SeatPhi::Clean, a, ExitRecord::Confirmed), Err(RecordRefusal::NotExposed));
-        assert_eq!(room_record(SeatPhi::Sealed, a, ExitRecord::Confirmed), Err(RecordRefusal::AlreadySealed));
+        assert_eq!(
+            room_record(SeatPhi::Clean, a, ExitRecord::Confirmed),
+            Err(RecordRefusal::NotExposed)
+        );
+        assert_eq!(
+            room_record(SeatPhi::Sealed, a, ExitRecord::Confirmed),
+            Err(RecordRefusal::AlreadySealed)
+        );
         assert!(Scrubbed::parse(b"short").is_none());
     }
 
     #[test]
     fn the_effective_label_is_the_highest_and_residue_is_not_a_brake() {
         let a = inc(b"inc-aaaaaa");
-        assert_eq!(effective(&Phi::Clean, &ConvPhi::Residue, None), Brake::Clear);
-        assert_eq!(effective(&Phi::Held, &ConvPhi::Exposed(a), None), Brake::Exposed(a));
-        assert_eq!(effective(&Phi::Clean, &ConvPhi::Clean, Some(&SeatPhi::Sealed)), Brake::Sealed);
-        let room = SeatPhi::Exposed { incident: a, cause: Cause::FoundLater };
-        assert_eq!(effective(&Phi::Clean, &ConvPhi::Clean, Some(&room)), Brake::Exposed(a));
+        assert_eq!(
+            effective(&Phi::Clean, &ConvPhi::Residue, None),
+            Brake::Clear
+        );
+        assert_eq!(
+            effective(&Phi::Held, &ConvPhi::Exposed(a), None),
+            Brake::Exposed(a)
+        );
+        assert_eq!(
+            effective(&Phi::Clean, &ConvPhi::Clean, Some(&SeatPhi::Sealed)),
+            Brake::Sealed
+        );
+        let room = SeatPhi::Exposed {
+            incident: a,
+            cause: Cause::FoundLater,
+        };
+        assert_eq!(
+            effective(&Phi::Clean, &ConvPhi::Clean, Some(&room)),
+            Brake::Exposed(a)
+        );
     }
 
     #[test]
     fn q1_a_source_reopens_only_for_a_false_alarm_on_its_own_incident() {
         let a = inc(b"inc-aaaaaa");
-        let open = SourceIncident::Open { inc: a, source: SourceKey::Folder };
+        let open = SourceIncident::Open {
+            inc: a,
+            source: SourceKey::Folder,
+        };
         assert!(source_denied(&open));
-        assert!(source_denied(&source_step(open, inc(b"inc-bbbbbb"), SeenRecord::Rewound, false)));
-        assert!(!source_denied(&source_step(open, a, SeenRecord::Rewound, false)));
-        assert!(source_denied(&source_step(open, a, SeenRecord::Rewound, true)));
-        assert!(source_denied(&source_step(open, a, SeenRecord::Confirmed, true)));
-        let shell = SourceIncident::Open { inc: a, source: SourceKey::Unknown };
+        assert!(source_denied(&source_step(
+            open,
+            inc(b"inc-bbbbbb"),
+            SeenRecord::Rewound,
+            false
+        )));
+        assert!(!source_denied(&source_step(
+            open,
+            a,
+            SeenRecord::Rewound,
+            false
+        )));
+        assert!(source_denied(&source_step(
+            open,
+            a,
+            SeenRecord::Rewound,
+            true
+        )));
+        assert!(source_denied(&source_step(
+            open,
+            a,
+            SeenRecord::Confirmed,
+            true
+        )));
+        let shell = SourceIncident::Open {
+            inc: a,
+            source: SourceKey::Unknown,
+        };
         assert!(!source_denied(&shell), "a shell tool has no source to deny");
     }
 }

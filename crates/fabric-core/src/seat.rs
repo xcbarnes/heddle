@@ -12,7 +12,9 @@ use crate::ids::{ConvId, SeatId};
 /// holds for the latest eight forks of a worktree.
 pub const MAX_FORKS: usize = 8;
 
-/// The `binding` file of one worktree.
+/// The `binding` file of one worktree. Read and written once per hook, so the
+/// size of the `Bound` variant does not matter.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Binding {
     /// No seat yet.
@@ -106,10 +108,15 @@ pub struct SeatEffects {
     pub observer_line: bool,
 }
 
-const NONE: SeatEffects = SeatEffects { minted: false, open_seat: false, fork_line: false, observer_line: false };
+const NONE: SeatEffects = SeatEffects {
+    minted: false,
+    open_seat: false,
+    fork_line: false,
+    observer_line: false,
+};
 
 fn is_fork(forks: &[Option<ConvId>; MAX_FORKS], conv: ConvId) -> bool {
-    forks.iter().any(|f| *f == Some(conv))
+    forks.contains(&Some(conv))
 }
 
 fn add_fork(forks: [Option<ConvId>; MAX_FORKS], conv: ConvId) -> [Option<ConvId>; MAX_FORKS] {
@@ -125,7 +132,11 @@ fn add_fork(forks: [Option<ConvId>; MAX_FORKS], conv: ConvId) -> [Option<ConvId>
     }
     // Full: drop the oldest, keep order.
     let mut out = [None; MAX_FORKS];
-    let mut src = forks.iter().skip(1).copied().chain(core::iter::once(Some(conv)));
+    let mut src = forks
+        .iter()
+        .skip(1)
+        .copied()
+        .chain(core::iter::once(Some(conv)));
     for o in out.iter_mut() {
         *o = src.next().flatten();
     }
@@ -133,27 +144,56 @@ fn add_fork(forks: [Option<ConvId>; MAX_FORKS], conv: ConvId) -> [Option<ConvId>
 }
 
 fn mint(seat: SeatId, conv: Option<ConvId>, forks: [Option<ConvId>; MAX_FORKS]) -> Binding {
-    Binding::Bound { seat, conv, n: if conv.is_some() { 1 } else { 0 }, opened: false, blocked: false, forks }
+    Binding::Bound {
+        seat,
+        conv,
+        n: if conv.is_some() { 1 } else { 0 },
+        opened: false,
+        blocked: false,
+        forks,
+    }
 }
 
 /// M12 for a hook from a conversation. `fresh` is a random seat id minted at
 /// the edge; it is used only when the worktree has no seat.
 pub fn seat_step(b: Binding, ev: SeatEvent, fresh: SeatId) -> (Binding, Role, SeatEffects) {
     let conv = match ev {
-        SeatEvent::Start { conv, .. } | SeatEvent::PersonPrompt { conv } | SeatEvent::Hook { conv } => conv,
+        SeatEvent::Start { conv, .. }
+        | SeatEvent::PersonPrompt { conv }
+        | SeatEvent::Hook { conv } => conv,
     };
-    let Binding::Bound { seat, conv: writer, n, opened, blocked, forks } = b else {
+    let Binding::Bound {
+        seat,
+        conv: writer,
+        n,
+        opened,
+        blocked,
+        forks,
+    } = b
+    else {
         // No seat. A fork gets a seat with no writer; anything else starts one.
         return match ev {
-            SeatEvent::Start { source: Source::Fork, .. } => (
+            SeatEvent::Start {
+                source: Source::Fork,
+                ..
+            } => (
                 mint(fresh, None, add_fork([None; MAX_FORKS], conv)),
                 Role::Observer,
-                SeatEffects { minted: true, open_seat: true, fork_line: true, ..NONE },
+                SeatEffects {
+                    minted: true,
+                    open_seat: true,
+                    fork_line: true,
+                    ..NONE
+                },
             ),
             SeatEvent::Start { .. } | SeatEvent::PersonPrompt { .. } | SeatEvent::Hook { .. } => (
                 mint(fresh, Some(conv), [None; MAX_FORKS]),
                 Role::Writer,
-                SeatEffects { minted: true, open_seat: true, ..NONE },
+                SeatEffects {
+                    minted: true,
+                    open_seat: true,
+                    ..NONE
+                },
             ),
         };
     };
@@ -170,28 +210,61 @@ pub fn seat_step(b: Binding, ev: SeatEvent, fresh: SeatId) -> (Binding, Role, Se
         return (b, Role::Observer, NONE);
     }
     let is_writer = writer == Some(conv);
-    let take = || (bound(Some(conv), n.saturating_add(1), forks), Role::Writer, NONE);
+    let take = || {
+        (
+            bound(Some(conv), n.saturating_add(1), forks),
+            Role::Writer,
+            NONE,
+        )
+    };
     match ev {
         // A fork is never the writer, even if it reuses the writer's id.
-        SeatEvent::Start { source: Source::Fork, .. } => {
+        SeatEvent::Start {
+            source: Source::Fork,
+            ..
+        } => {
             let w = if is_writer { None } else { writer };
-            (bound(w, n, add_fork(forks, conv)), Role::Observer, SeatEffects { fork_line: true, ..NONE })
+            (
+                bound(w, n, add_fork(forks, conv)),
+                Role::Observer,
+                SeatEffects {
+                    fork_line: true,
+                    ..NONE
+                },
+            )
         }
         // An automatic compaction never moves the seat.
-        SeatEvent::Start { source: Source::Compact, .. } => match writer {
+        SeatEvent::Start {
+            source: Source::Compact,
+            ..
+        } => match writer {
             None => take(),
             Some(w) if w == conv => (b, Role::Writer, NONE),
             Some(_) => (b, Role::Observer, NONE),
         },
         // The last starter is the writer; a person's prompt takes the seat back.
-        SeatEvent::Start { source: Source::Startup | Source::Resume | Source::Clear, .. }
+        SeatEvent::Start {
+            source: Source::Startup | Source::Resume | Source::Clear,
+            ..
+        }
         | SeatEvent::PersonPrompt { .. } => {
-            if is_writer { (b, Role::Writer, NONE) } else { take() }
+            if is_writer {
+                (b, Role::Writer, NONE)
+            } else {
+                take()
+            }
         }
         SeatEvent::Hook { .. } => match writer {
             None => take(),
             Some(w) if w == conv => (b, Role::Writer, NONE),
-            Some(_) => (b, Role::Observer, SeatEffects { observer_line: true, ..NONE }),
+            Some(_) => (
+                b,
+                Role::Observer,
+                SeatEffects {
+                    observer_line: true,
+                    ..NONE
+                },
+            ),
         },
     }
 }
@@ -200,20 +273,61 @@ pub fn seat_step(b: Binding, ev: SeatEvent, fresh: SeatId) -> (Binding, Role, Se
 pub fn seat_room_step(b: Binding, a: RoomAnswer) -> (Binding, SeatEffects) {
     match b {
         Binding::NoSeat => (b, NONE),
-        Binding::Bound { seat, conv, n, opened, forks, .. } => match a {
-            RoomAnswer::Opened => (Binding::Bound { seat, conv, n, opened: true, blocked: false, forks }, NONE),
-            RoomAnswer::NoSuchSeat => (
-                Binding::Bound { seat, conv, n, opened: false, blocked: false, forks },
-                SeatEffects { open_seat: true, ..NONE },
+        Binding::Bound {
+            seat,
+            conv,
+            n,
+            opened,
+            forks,
+            ..
+        } => match a {
+            RoomAnswer::Opened => (
+                Binding::Bound {
+                    seat,
+                    conv,
+                    n,
+                    opened: true,
+                    blocked: false,
+                    forks,
+                },
+                NONE,
             ),
-            RoomAnswer::TokenBraked if !opened => (Binding::Bound { seat, conv, n, opened, blocked: true, forks }, NONE),
+            RoomAnswer::NoSuchSeat => (
+                Binding::Bound {
+                    seat,
+                    conv,
+                    n,
+                    opened: false,
+                    blocked: false,
+                    forks,
+                },
+                SeatEffects {
+                    open_seat: true,
+                    ..NONE
+                },
+            ),
+            RoomAnswer::TokenBraked if !opened => (
+                Binding::Bound {
+                    seat,
+                    conv,
+                    n,
+                    opened,
+                    blocked: true,
+                    forks,
+                },
+                NONE,
+            ),
             RoomAnswer::TokenBraked => (b, NONE),
         },
     }
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::indexing_slicing, clippy::arithmetic_side_effects)]
+#[allow(
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 mod tests {
     use super::*;
     use alloc::vec::Vec;
@@ -230,7 +344,13 @@ mod tests {
     fn events() -> Vec<SeatEvent> {
         let mut v = Vec::new();
         for c in [conv(1), conv(2), conv(3)] {
-            for source in [Source::Startup, Source::Resume, Source::Clear, Source::Compact, Source::Fork] {
+            for source in [
+                Source::Startup,
+                Source::Resume,
+                Source::Clear,
+                Source::Compact,
+                Source::Fork,
+            ] {
                 v.push(SeatEvent::Start { source, conv: c });
             }
             v.push(SeatEvent::PersonPrompt { conv: c });
@@ -242,7 +362,8 @@ mod tests {
     #[test]
     fn x5_a_fork_never_becomes_writer_over_every_sequence_of_four() {
         let evs = events();
-        let mut stack: Vec<(Binding, Vec<ConvId>, u8)> = alloc::vec![(Binding::NoSeat, Vec::new(), 0)];
+        let mut stack: Vec<(Binding, Vec<ConvId>, u8)> =
+            alloc::vec![(Binding::NoSeat, Vec::new(), 0)];
         let mut checked = 0u32;
         while let Some((b, forked, depth)) = stack.pop() {
             if depth == 4 {
@@ -251,17 +372,26 @@ mod tests {
             for ev in &evs {
                 let (b2, role, _) = seat_step(b, *ev, fresh());
                 let mut forked2 = forked.clone();
-                if let SeatEvent::Start { source: Source::Fork, conv: c } = ev {
+                if let SeatEvent::Start {
+                    source: Source::Fork,
+                    conv: c,
+                } = ev
+                {
                     forked2.push(*c);
                 }
                 let who = match ev {
-                    SeatEvent::Start { conv, .. } | SeatEvent::PersonPrompt { conv } | SeatEvent::Hook { conv } => *conv,
+                    SeatEvent::Start { conv, .. }
+                    | SeatEvent::PersonPrompt { conv }
+                    | SeatEvent::Hook { conv } => *conv,
                 };
                 if forked2.contains(&who) {
                     assert_eq!(role, Role::Observer, "X5: {ev:?}");
                 }
                 if let Binding::Bound { conv: Some(w), .. } = b2 {
-                    assert!(!forked2.contains(&w), "X5: a fork is the writer after {ev:?}");
+                    assert!(
+                        !forked2.contains(&w),
+                        "X5: a fork is the writer after {ev:?}"
+                    );
                 }
                 checked += 1;
                 stack.push((b2, forked2, depth + 1));
@@ -272,13 +402,34 @@ mod tests {
 
     #[test]
     fn the_last_starter_writes_and_a_typed_prompt_takes_the_seat_back() {
-        let (b, r, fx) = seat_step(Binding::NoSeat, SeatEvent::Start { source: Source::Startup, conv: conv(1) }, fresh());
+        let (b, r, fx) = seat_step(
+            Binding::NoSeat,
+            SeatEvent::Start {
+                source: Source::Startup,
+                conv: conv(1),
+            },
+            fresh(),
+        );
         assert_eq!((r, fx.minted, fx.open_seat), (Role::Writer, true, true));
-        let (b, r, _) = seat_step(b, SeatEvent::Start { source: Source::Startup, conv: conv(2) }, fresh());
+        let (b, r, _) = seat_step(
+            b,
+            SeatEvent::Start {
+                source: Source::Startup,
+                conv: conv(2),
+            },
+            fresh(),
+        );
         assert_eq!(r, Role::Writer);
         let (b, r, fx) = seat_step(b, SeatEvent::Hook { conv: conv(1) }, fresh());
         assert_eq!((r, fx.observer_line), (Role::Observer, true));
-        let (b, r, _) = seat_step(b, SeatEvent::Start { source: Source::Compact, conv: conv(1) }, fresh());
+        let (b, r, _) = seat_step(
+            b,
+            SeatEvent::Start {
+                source: Source::Compact,
+                conv: conv(1),
+            },
+            fresh(),
+        );
         assert_eq!(r, Role::Observer, "a compaction never moves the seat");
         let (_, r, _) = seat_step(b, SeatEvent::PersonPrompt { conv: conv(1) }, fresh());
         assert_eq!(r, Role::Writer);
@@ -286,11 +437,32 @@ mod tests {
 
     #[test]
     fn x8_a_token_brake_join_blocks_and_an_accepted_open_clears_it() {
-        let (b, _, _) = seat_step(Binding::NoSeat, SeatEvent::Start { source: Source::Startup, conv: conv(1) }, fresh());
+        let (b, _, _) = seat_step(
+            Binding::NoSeat,
+            SeatEvent::Start {
+                source: Source::Startup,
+                conv: conv(1),
+            },
+            fresh(),
+        );
         let (b, _) = seat_room_step(b, RoomAnswer::TokenBraked);
-        assert!(matches!(b, Binding::Bound { blocked: true, opened: false, .. }));
+        assert!(matches!(
+            b,
+            Binding::Bound {
+                blocked: true,
+                opened: false,
+                ..
+            }
+        ));
         let (b, _) = seat_room_step(b, RoomAnswer::Opened);
-        assert!(matches!(b, Binding::Bound { blocked: false, opened: true, .. }));
+        assert!(matches!(
+            b,
+            Binding::Bound {
+                blocked: false,
+                opened: true,
+                ..
+            }
+        ));
         let (b, fx) = seat_room_step(b, RoomAnswer::NoSuchSeat);
         assert!(fx.open_seat && matches!(b, Binding::Bound { opened: false, .. }));
     }
