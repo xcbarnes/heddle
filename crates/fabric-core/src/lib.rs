@@ -13,6 +13,7 @@ extern crate alloc;
 pub mod asset;
 pub mod claim;
 pub mod config;
+pub mod detect;
 pub mod ids;
 pub mod link;
 pub mod phi;
