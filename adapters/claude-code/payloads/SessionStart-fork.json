@@ -1,0 +1,11 @@
+{
+  "context_tokens": 3946,
+  "cwd": "/tmp/day0/repo",
+  "estimated_cache_write_usd": 0.0008,
+  "hook_event_name": "SessionStart",
+  "prompt_cache_likely_expired": false,
+  "seconds_since_last_response": 0,
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "source": "fork",
+  "transcript_path": "/Users/me/.claude/projects/-tmp-day0-repo/00000000-0000-4000-8000-000000000000.jsonl"
+}

@@ -1,0 +1,25 @@
+{
+  "cwd": "/tmp/day0/repo",
+  "duration_ms": 56,
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PostToolUse",
+  "permission_mode": "default",
+  "prompt_id": "00000000-0000-4000-8000-000000000000",
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "tool_input": {
+    "command": "cat /tmp/day0/repo/secret.txt",
+    "description": "Print contents of secret.txt once"
+  },
+  "tool_name": "Bash",
+  "tool_response": {
+    "interrupted": false,
+    "isImage": false,
+    "noOutputExpected": false,
+    "stderr": "",
+    "stdout": "TOKEN-0000000000000000"
+  },
+  "tool_use_id": "toolu_01EXAMPLE",
+  "transcript_path": "/Users/me/.claude/projects/-tmp-day0-repo/00000000-0000-4000-8000-000000000000.jsonl"
+}

@@ -1,0 +1,9 @@
+{
+  "cwd": "/tmp/day0/repo",
+  "hook_event_name": "UserPromptSubmit",
+  "permission_mode": "default",
+  "prompt": "Run this exact command with the Bash tool, once: touch /tmp/day0/repo/marker . If the call is blocked or denied, do not retry and do not try another way. Then reply with one word: DONE or BLOCKED.",
+  "prompt_id": "00000000-0000-4000-8000-000000000000",
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "transcript_path": "/Users/me/.claude/projects/-tmp-day0-repo/00000000-0000-4000-8000-000000000000.jsonl"
+}

@@ -1,0 +1,17 @@
+{
+  "cwd": "/tmp/day0/repo",
+  "effort": {
+    "level": "medium"
+  },
+  "hook_event_name": "PreToolUse",
+  "permission_mode": "default",
+  "prompt_id": "00000000-0000-4000-8000-000000000000",
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "tool_input": {
+    "command": "touch /tmp/day0/repo/marker",
+    "description": "Create marker file at the specified path"
+  },
+  "tool_name": "Bash",
+  "tool_use_id": "toolu_01EXAMPLE",
+  "transcript_path": "/Users/me/.claude/projects/-tmp-day0-repo/00000000-0000-4000-8000-000000000000.jsonl"
+}
