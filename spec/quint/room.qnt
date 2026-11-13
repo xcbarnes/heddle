@@ -375,11 +375,14 @@ module room {
       or (isSet(prev.restr.agentStop) and not(isSet(st.restr.agentStop)))
     (cleared implies ev.kind == KResume) and (agentCleared implies (ev.kind == KResume or ev.kind == KConfirm))
   }
+  // Only slots that hold a mark count: an empty slot's seqOf is a sentinel.
+  pure def survives(before: Slot, after: Slot, upto: int): bool =
+    (isSet(before) and seqOf(before) > upto) implies isSet(after)
   val P8 = ev.kind == KResume implies (
-    (seqOf(prev.restr.agentPause) > ev.n implies isSet(st.restr.agentPause))
-    and (seqOf(prev.restr.agentStop) > ev.n implies isSet(st.restr.agentStop))
-    and (seqOf(prev.restr.personPause) > ev.n implies isSet(st.restr.personPause))
-    and (seqOf(prev.restr.personStop) > ev.n implies isSet(st.restr.personStop))
+    survives(prev.restr.agentPause, st.restr.agentPause, ev.n)
+    and survives(prev.restr.agentStop, st.restr.agentStop, ev.n)
+    and survives(prev.restr.personPause, st.restr.personPause, ev.n)
+    and survives(prev.restr.personStop, st.restr.personStop, ev.n)
   )
   val P9 = (isSet(prev.restr.agentStop) and isSet(st.restr.agentStop)) implies firstAtOf(prev.restr.agentStop) == firstAtOf(st.restr.agentStop)
   // M13, the room's half

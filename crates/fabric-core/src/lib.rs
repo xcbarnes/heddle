@@ -11,5 +11,6 @@
 extern crate alloc;
 
 pub mod config;
+pub mod ids;
 pub mod restrict;
 pub mod time;
