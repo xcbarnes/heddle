@@ -94,3 +94,19 @@ day0/run.sh /tmp/day0-out pre- batch-  # only cases whose names start so
 ```
 
 It uses the subscription login of the terminal `claude` and costs a few cents of Haiku per run.
+
+## heddle end to end, 2026-11-13
+
+`heddle-e2e.sh` runs the CI-built heddle (`heddle-macos` job, test-only artifact) as every PHI hook line, in exec form with `onFailure: "block"` and a 10 s timeout. It does this in a scratch repo that heddle treats as enrolled, under real `claude -p` sessions on Claude Code 2.1.321. The fixture number is assembled at run time. Afterwards the script deletes the label entries its sessions created.
+
+| case | what happened | label file afterwards |
+|---|---|---|
+| clean | `touch` ran; heddle printed nothing | none |
+| prompt-held | a typed prompt with an SSN was blocked before sending: "Fabric held this prompt … (rule R-01). It was not sent." | `held` |
+| result-replaced | `echo` printed the number; PostToolUse replaced the Bash result with the withheld sentence (R-09), and **the number appears nowhere in the session's stream** | `exposed … result_masked` |
+| brake-persists | the same conversation resumed: the next prompt was blocked with the brake sentence and its incident id | unchanged |
+| tool-input | the model wrote the number into a command; PreToolUse denied it | `exposed … tool_input` |
+| unreadable-label | a label file in an unknown format was read as braked (V5); the first prompt was blocked | `exposed … found_later` |
+| bad-argument | a hook line with an unknown harness argument stopped the session under R-00 | none |
+
+Not covered yet: forks (T3 needs the root-uuid match), subagents' prompts, the transcript scan, and the room.
