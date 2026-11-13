@@ -34,8 +34,13 @@ const STOPPED: u8 = 3;
 /// Payload caps (§5.4): 256 KiB, and 4 MiB for the events that carry results.
 const CAP: usize = 256 * 1024;
 const CAP_RESULTS: usize = 4 * 1024 * 1024;
-/// Root-owned, written by `setup`: one enrolled repo root per line.
-const ENROLLED: &str = "/usr/local/fabric/etc/enrolled";
+/// heddle lives at `<root>/bin/<version>/heddle` and its policy at
+/// `<root>/etc/`: root-owned `/usr/local/fabric` once installed. There is no
+/// environment override, so an agent cannot point a hook at other policy.
+fn etc_dir() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.parent()?.parent()?.join("etc"))
+}
 
 /// A PHI check that could not complete.
 #[derive(Debug)]
@@ -72,7 +77,10 @@ fn arm_watchdog() -> bool {
 }
 
 fn decide(kind: HookKind) -> Decision {
-    let enrolled = match read_enrolled(Path::new(ENROLLED)) {
+    let Some(etc) = etc_dir() else {
+        return hook::fault(kind);
+    };
+    let enrolled = match read_enrolled(&etc.join("enrolled")) {
         Ok(e) => e,
         Err(Fault) => return hook::fault(kind),
     };

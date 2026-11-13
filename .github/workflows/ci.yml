@@ -45,6 +45,22 @@ jobs:
       - name: No drift from the committed lockfile and formatting
         run: test ! -s ci.patch || { cat ci.patch; exit 1; }
 
+  # The macOS binary, for local end-to-end tests only. An installed binary
+  # comes from a tagged release that the admin user verifies (§5.10).
+  heddle-macos:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && cargo build --release --locked -p heddle
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: heddle-aarch64-apple-darwin-test-only
+          path: target/release/heddle
+          retention-days: 7
+
   supply-chain:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
