@@ -192,7 +192,7 @@ impl fmt::Debug for Proof {
 pub struct TokenId(pub u16);
 
 macro_rules! short_name {
-    ($(#[$doc:meta])* $name:ident, $max:literal) => {
+    ($(#[$doc:meta])* $name:ident, $max:literal, $also:literal) => {
         $(#[$doc])*
         #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub struct $name {
@@ -201,10 +201,10 @@ macro_rules! short_name {
         }
 
         impl $name {
-            /// The checked constructor: `[a-z0-9-]`, 1 to the maximum.
+            /// The checked constructor: `[a-z0-9]` and the extra bytes, 1 to the maximum.
             pub fn parse(s: &[u8]) -> Option<$name> {
                 let len = u8::try_from(s.len()).ok()?;
-                if s.is_empty() || s.len() > $max || !s.iter().all(|b| lower_alnum(*b) || *b == b'-') {
+                if s.is_empty() || s.len() > $max || !s.iter().all(|b| lower_alnum(*b) || $also.contains(b)) {
                     return None;
                 }
                 let mut bytes = [0u8; $max];
@@ -230,12 +230,42 @@ macro_rules! short_name {
 
 short_name!(
     /// A person's login: `[a-z0-9-]{1,39}`, set at minting, never from a payload.
-    Login, 39
+    Login, 39, b"-"
 );
 short_name!(
     /// A machine's name: `[a-z0-9-]{1,24}`, set at minting.
-    Machine, 24
+    Machine, 24, b"-"
 );
+short_name!(
+    /// An MCP server's id in the registry and in local use: `[a-z0-9_-]{1,64}`.
+    McpServerId, 64, b"-_"
+);
+
+/// A harness conversation: Claude Code's `session_id`, a lowercase UUID
+/// (`8-4-4-4-12` hex digits). Local only; never sent to the room.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConvId([u8; 36]);
+
+impl ConvId {
+    /// The checked constructor.
+    pub fn parse(s: &[u8]) -> Option<ConvId> {
+        let arr = <[u8; 36]>::try_from(s).ok()?;
+        let ok = arr.iter().enumerate().all(|(i, b)| {
+            if matches!(i, 8 | 13 | 18 | 23) { *b == b'-' } else { b.is_ascii_digit() || (b'a'..=b'f').contains(b) }
+        });
+        if ok { Some(ConvId(arr)) } else { None }
+    }
+    /// The id's bytes, for a file name.
+    pub const fn bytes(&self) -> &[u8; 36] {
+        &self.0
+    }
+}
+
+impl fmt::Display for ConvId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_bytes(f, &self.0)
+    }
+}
 
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
@@ -285,6 +315,16 @@ mod tests {
         assert!(OpId::parse(b"01hz3k4m5n6p7q8r9s0t1v2w3x").is_some());
         assert!(OpId::parse(b"01hz3k4m5n6p7q8r9s0t1v2w3i").is_none());
         assert!(OpId::parse(b"01hz3k4m5n6p7q8r9s0t1v2w3").is_none());
+    }
+
+    #[test]
+    fn conversation_ids_are_lowercase_uuids() {
+        assert!(ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca0").is_some());
+        assert!(ConvId::parse(b"00893AAF-19fa-41d2-8238-13269b9b3ca0").is_none());
+        assert!(ConvId::parse(b"00893aaf019fa-41d2-8238-13269b9b3ca0").is_none());
+        assert!(ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca").is_none());
+        assert!(McpServerId::parse(b"my_server-1").is_some());
+        assert!(McpServerId::parse(b"My.Server").is_none());
     }
 
     #[test]
