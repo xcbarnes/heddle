@@ -29,11 +29,19 @@ pub struct ConvState {
 }
 
 impl ConvState {
-    const CLEAN: ConvState = ConvState { phi: Phi::Clean, sub_since_prompt: false };
+    const CLEAN: ConvState = ConvState {
+        phi: Phi::Clean,
+        sub_since_prompt: false,
+    };
 
     fn braked(incident: IncidentId) -> ConvState {
         ConvState {
-            phi: Phi::Exposed { incident, cause: Cause::FoundLater, hits: 1, acked: false },
+            phi: Phi::Exposed {
+                incident,
+                cause: Cause::FoundLater,
+                hits: 1,
+                acked: false,
+            },
             sub_since_prompt: true,
         }
     }
@@ -43,7 +51,11 @@ impl ConvState {
         out.extend_from_slice(FORMAT);
         out.extend_from_slice(b"\nphi ");
         out.extend_from_slice(phi::encode_phi(&self.phi).as_bytes());
-        out.extend_from_slice(if self.sub_since_prompt { b"\nsub 1\n" } else { b"\nsub 0\n" });
+        out.extend_from_slice(if self.sub_since_prompt {
+            b"\nsub 1\n"
+        } else {
+            b"\nsub 0\n"
+        });
         out
     }
 
@@ -59,7 +71,10 @@ impl ConvState {
             _ => return None,
         };
         let rest_empty = lines.all(|l| l.is_empty());
-        rest_empty.then_some(ConvState { phi, sub_since_prompt: sub })
+        rest_empty.then_some(ConvState {
+            phi,
+            sub_since_prompt: sub,
+        })
     }
 }
 
@@ -78,7 +93,10 @@ impl Machine {
 
     /// A folder at `dir`, created 0700 if missing.
     pub fn at(dir: PathBuf) -> io::Result<Machine> {
-        fs::DirBuilder::new().recursive(true).mode(0o700).create(dir.join("quarantine"))?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir.join("quarantine"))?;
         Ok(Machine { dir })
     }
 
@@ -121,7 +139,11 @@ impl Machine {
         let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
         let _ = fs::remove_file(&tmp);
         {
-            let mut f = OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp)?;
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
             f.write_all(&s.encode())?;
             f.sync_all()?;
         }
@@ -133,7 +155,12 @@ impl Machine {
     /// never the conversation. Best effort: counting is not a safety property.
     pub fn count(&self, kind: HookKind, rule: RuleId) {
         let line = format!("{} {}\n", kind.name(), rule_name(rule));
-        if let Ok(mut f) = OpenOptions::new().create(true).append(true).mode(0o600).open(self.dir.join("counts")) {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(self.dir.join("counts"))
+        {
             let _ = f.write_all(line.as_bytes());
         }
     }
@@ -149,12 +176,20 @@ mod tests {
         let inc = IncidentId::parse(b"inc-aaaaaa").expect("id");
         for s in [
             ConvState::CLEAN,
-            ConvState { phi: Phi::Held, sub_since_prompt: true },
+            ConvState {
+                phi: Phi::Held,
+                sub_since_prompt: true,
+            },
             ConvState::braked(inc),
         ] {
             assert_eq!(ConvState::decode(&s.encode()), Some(s));
         }
-        for bad in [&b""[..], b"fabric-conv 2\nphi clean\nsub 0\n", b"fabric-conv 1\nphi clean\n", b"fabric-conv 1\nphi clean\nsub 2\n"] {
+        for bad in [
+            &b""[..],
+            b"fabric-conv 2\nphi clean\nsub 0\n",
+            b"fabric-conv 1\nphi clean\n",
+            b"fabric-conv 1\nphi clean\nsub 2\n",
+        ] {
             assert_eq!(ConvState::decode(bad), None);
         }
     }
@@ -168,7 +203,10 @@ mod tests {
         let fresh = IncidentId::parse(b"inc-bbbbbb").expect("id");
         assert_eq!(m.read_conv(&c, fresh), (ConvState::CLEAN, false));
         let _lock = m.lock().expect("lock");
-        let held = ConvState { phi: Phi::Held, sub_since_prompt: false };
+        let held = ConvState {
+            phi: Phi::Held,
+            sub_since_prompt: false,
+        };
         m.write_conv(&c, &held).expect("write");
         assert_eq!(m.read_conv(&c, fresh), (held, false));
         let _ = fs::remove_dir_all(dir);

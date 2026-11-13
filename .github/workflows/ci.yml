@@ -62,6 +62,12 @@ jobs:
       - run: rustup toolchain install
       - run: cargo deny --locked check
       - run: cargo audit --deny warnings
+      - name: No locked crate version younger than seven days (crate policy)
+        run: |
+          now=$(date -u +%s); bad=0
+          for nv in $(awk -F'"' '/^name = /{n=$2} /^version = /{v=$2} /^source = "registry/{print n"@"v}' Cargo.lock); do
+            t=$(curl -fsS -A ci-dependency-age-check "https://crates.io/api/v1/crates/${nv%@*}/${nv#*@}" | jq -r .version.created_at)
+            [ $(( now - $(date -u -d "$t" +%s) )) -ge 604800 ] || { echo "too new: $nv ($t)"; bad=1; }; done; exit $bad
       - name: At most 40 crates built, on any target (crate policy)
         run: |
           for t in aarch64-apple-darwin x86_64-unknown-linux-gnu wasm32-unknown-unknown; do cargo tree --locked --workspace -e normal,build --prefix none --target "$t"; done | sed 's/ (\*)$//' | sort -u > crates.txt

@@ -122,7 +122,10 @@ pub fn text(m: &Msg) -> String {
              Rewind to before that turn, scrub it, and have the admin user record the rewind. \
              Moving the thread to PHI-safe infrastructure is not available yet."
         ),
-        Msg::Sealed => write!(s, "Fabric sealed this thread: a person confirmed patient information reached it."),
+        Msg::Sealed => write!(
+            s,
+            "Fabric sealed this thread: a person confirmed patient information reached it."
+        ),
         Msg::Held => write!(
             s,
             "Fabric is holding a prompt in this thread: possible patient information. \
@@ -235,7 +238,12 @@ pub struct ScanCtx {
 
 /// The first blocking hit in this hook's text: the decision, and the event
 /// for the label machine. `None` when the hit only counts.
-pub fn on_hit(kind: HookKind, rule: RuleId, ctx: &ScanCtx, incident: IncidentId) -> Option<(Decision, PhiEvent)> {
+pub fn on_hit(
+    kind: HookKind,
+    rule: RuleId,
+    ctx: &ScanCtx,
+    incident: IncidentId,
+) -> Option<(Decision, PhiEvent)> {
     let counts_only = match rule {
         RuleId::R00 => false,
         RuleId::R08 => true,
@@ -256,14 +264,32 @@ pub fn on_hit(kind: HookKind, rule: RuleId, ctx: &ScanCtx, incident: IncidentId)
     }
     match kind {
         HookKind::UserPromptSubmit => {
-            let m = if ctx.person_typed { Msg::PromptHeld(rule) } else { Msg::Braked(incident) };
-            Some((Decision::BlockPrompt(m), PhiEvent::PromptHit { rule, person_typed: ctx.person_typed, incident }))
+            let m = if ctx.person_typed {
+                Msg::PromptHeld(rule)
+            } else {
+                Msg::Braked(incident)
+            };
+            Some((
+                Decision::BlockPrompt(m),
+                PhiEvent::PromptHit {
+                    rule,
+                    person_typed: ctx.person_typed,
+                    incident,
+                },
+            ))
         }
-        HookKind::PreToolUse => Some((Decision::Deny(Msg::Braked(incident)), PhiEvent::ToolInputHit { rule, incident })),
+        HookKind::PreToolUse => Some((
+            Decision::Deny(Msg::Braked(incident)),
+            PhiEvent::ToolInputHit { rule, incident },
+        )),
         HookKind::PostToolUse => {
             let replace = ctx.can_replace && !ctx.passed_model;
             let m = Msg::ResultWithheld(rule, incident);
-            let d = if replace { Decision::ReplaceBash(m) } else { Decision::Halt(m) };
+            let d = if replace {
+                Decision::ReplaceBash(m)
+            } else {
+                Decision::Halt(m)
+            };
             let ev = PhiEvent::ResultHit {
                 rule,
                 can_replace: replace,
@@ -273,10 +299,14 @@ pub fn on_hit(kind: HookKind, rule: RuleId, ctx: &ScanCtx, incident: IncidentId)
             };
             Some((d, ev))
         }
-        HookKind::PostToolBatch => {
-            Some((Decision::StopLoop(Msg::LoopStopped(rule, incident)), PhiEvent::BatchHit { rule, incident }))
-        }
-        HookKind::SessionStart | HookKind::UserPromptExpansion | HookKind::PreCompact | HookKind::ConfigChange => None,
+        HookKind::PostToolBatch => Some((
+            Decision::StopLoop(Msg::LoopStopped(rule, incident)),
+            PhiEvent::BatchHit { rule, incident },
+        )),
+        HookKind::SessionStart
+        | HookKind::UserPromptExpansion
+        | HookKind::PreCompact
+        | HookKind::ConfigChange => None,
     }
 }
 
@@ -313,7 +343,11 @@ mod tests {
     fn h1e_a_fault_stops_every_phi_line() {
         for k in KINDS {
             let d = fault(k);
-            assert_eq!(d == Decision::Pass, !k.is_phi_line() && k != HookKind::SessionStart, "{k:?}");
+            assert_eq!(
+                d == Decision::Pass,
+                !k.is_phi_line() && k != HookKind::SessionStart,
+                "{k:?}"
+            );
             if k.is_phi_line() {
                 assert_ne!(d, Decision::Pass, "{k:?}");
             }
@@ -325,7 +359,10 @@ mod tests {
         for k in KINDS {
             for b in [Brake::Exposed(inc()), Brake::Sealed] {
                 let d = brake_gate(k, b);
-                assert!(d.is_some() && (d != Some(Decision::Pass) || k == HookKind::ConfigChange), "{k:?} {b:?}");
+                assert!(
+                    d.is_some() && (d != Some(Decision::Pass) || k == HookKind::ConfigChange),
+                    "{k:?} {b:?}"
+                );
             }
             assert_eq!(brake_gate(k, Brake::Clear), None);
             let held = brake_gate(k, Brake::Held);
@@ -336,21 +373,47 @@ mod tests {
 
     #[test]
     fn r00_blocks_everywhere_other_rules_only_where_enforced_and_r08_only_counts() {
-        let ctx = ScanCtx { enforce: false, person_typed: true, can_replace: true, passed_model: false };
+        let ctx = ScanCtx {
+            enforce: false,
+            person_typed: true,
+            can_replace: true,
+            passed_model: false,
+        };
         assert!(on_hit(HookKind::PreToolUse, RuleId::R00, &ctx, inc()).is_some());
         assert!(on_hit(HookKind::PreToolUse, RuleId::R01, &ctx, inc()).is_none());
-        let on = ScanCtx { enforce: true, ..ctx };
+        let on = ScanCtx {
+            enforce: true,
+            ..ctx
+        };
         assert!(on_hit(HookKind::PreToolUse, RuleId::R01, &on, inc()).is_some());
         assert!(on_hit(HookKind::PreToolUse, RuleId::R08, &on, inc()).is_none());
     }
 
     #[test]
     fn a_result_is_replaced_only_when_its_shape_is_known_and_no_model_saw_it() {
-        let base = ScanCtx { enforce: true, person_typed: true, can_replace: true, passed_model: false };
-        let hit = |ctx: ScanCtx| on_hit(HookKind::PostToolUse, RuleId::R03, &ctx, inc()).map(|(d, _)| d);
+        let base = ScanCtx {
+            enforce: true,
+            person_typed: true,
+            can_replace: true,
+            passed_model: false,
+        };
+        let hit =
+            |ctx: ScanCtx| on_hit(HookKind::PostToolUse, RuleId::R03, &ctx, inc()).map(|(d, _)| d);
         assert!(matches!(hit(base), Some(Decision::ReplaceBash(_))));
-        assert!(matches!(hit(ScanCtx { can_replace: false, ..base }), Some(Decision::Halt(_))));
-        assert!(matches!(hit(ScanCtx { passed_model: true, ..base }), Some(Decision::Halt(_))));
+        assert!(matches!(
+            hit(ScanCtx {
+                can_replace: false,
+                ..base
+            }),
+            Some(Decision::Halt(_))
+        ));
+        assert!(matches!(
+            hit(ScanCtx {
+                passed_model: true,
+                ..base
+            }),
+            Some(Decision::Halt(_))
+        ));
     }
 
     #[test]
@@ -358,7 +421,13 @@ mod tests {
         let t = text(&Msg::ResultWithheld(RuleId::R01, inc()));
         assert!(t.contains("rule R-01") && t.contains("inc-aaaaaa"));
         assert!(t.is_ascii());
-        for m in [Msg::Braked(inc()), Msg::Sealed, Msg::Held, Msg::PromptHeld(RuleId::R04), Msg::Fault] {
+        for m in [
+            Msg::Braked(inc()),
+            Msg::Sealed,
+            Msg::Held,
+            Msg::PromptHeld(RuleId::R04),
+            Msg::Fault,
+        ] {
             let s = text(&m);
             assert!(!s.is_empty() && s.is_ascii() && s.len() < 400, "{m:?}");
         }

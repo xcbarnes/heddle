@@ -85,17 +85,26 @@ fn decide(kind: HookKind) -> Decision {
         Err(_) => return hook::fault(kind),
     };
     match fresh_incident() {
-        Some(inc) => decide_with(kind, &payload, &machine, &enrolled, inc).unwrap_or_else(|Fault| hook::fault(kind)),
+        Some(inc) => decide_with(kind, &payload, &machine, &enrolled, inc)
+            .unwrap_or_else(|Fault| hook::fault(kind)),
         None => hook::fault(kind),
     }
 }
 
 /// Read the payload, capped. A payload over the cap is R-07 and blocks.
 fn read_payload(kind: HookKind) -> Result<Vec<u8>, Fault> {
-    let cap = if matches!(kind, HookKind::PostToolUse | HookKind::PostToolBatch) { CAP_RESULTS } else { CAP };
+    let cap = if matches!(kind, HookKind::PostToolUse | HookKind::PostToolBatch) {
+        CAP_RESULTS
+    } else {
+        CAP
+    };
     let limit = u64::try_from(cap.saturating_add(1)).map_err(|_| Fault)?;
     let mut buf = Vec::new();
-    std::io::stdin().lock().take(limit).read_to_end(&mut buf).map_err(|_| Fault)?;
+    std::io::stdin()
+        .lock()
+        .take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|_| Fault)?;
     if buf.len() > cap { Err(Fault) } else { Ok(buf) }
 }
 
@@ -105,7 +114,12 @@ fn read_enrolled(path: &Path) -> Result<Vec<String>, Fault> {
     match std::fs::read(path) {
         Ok(bytes) => {
             let text = String::from_utf8(bytes).map_err(|_| Fault)?;
-            Ok(text.lines().map(str::trim).filter(|l| l.starts_with('/')).map(String::from).collect())
+            Ok(text
+                .lines()
+                .map(str::trim)
+                .filter(|l| l.starts_with('/'))
+                .map(String::from)
+                .collect())
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(_) => Err(Fault),
@@ -116,7 +130,10 @@ fn read_enrolled(path: &Path) -> Result<Vec<String>, Fault> {
 fn enforced(cwd: &str, enrolled: &[String]) -> bool {
     enrolled.iter().any(|root| {
         let root = root.trim_end_matches('/');
-        cwd == root || cwd.strip_prefix(root).is_some_and(|rest| rest.starts_with('/'))
+        cwd == root
+            || cwd
+                .strip_prefix(root)
+                .is_some_and(|rest| rest.starts_with('/'))
     })
 }
 
@@ -124,7 +141,10 @@ fn enforced(cwd: &str, enrolled: &[String]) -> bool {
 fn fresh_incident() -> Option<IncidentId> {
     const CHARS: &[u8; 36] = b"abcdefghijklmnopqrstuvwxyz0123456789";
     let mut raw = [0u8; 6];
-    std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut raw).ok()?;
+    std::fs::File::open("/dev/urandom")
+        .ok()?
+        .read_exact(&mut raw)
+        .ok()?;
     let mut id = *b"inc-000000";
     for (slot, r) in id.iter_mut().skip(4).zip(raw) {
         *slot = *CHARS.get(usize::from(r.checked_rem(36)?))?;
@@ -141,7 +161,10 @@ fn scan_text(kind: HookKind, v: &Value) -> Result<Option<Vec<u8>>, Fault> {
         HookKind::PreToolUse => v.get("tool_input"),
         HookKind::PostToolUse => v.get("tool_response"),
         HookKind::PostToolBatch => v.get("tool_calls"),
-        HookKind::SessionStart | HookKind::UserPromptExpansion | HookKind::PreCompact | HookKind::ConfigChange => None,
+        HookKind::SessionStart
+        | HookKind::UserPromptExpansion
+        | HookKind::PreCompact
+        | HookKind::ConfigChange => None,
     };
     let Some(target) = target else {
         return Ok(None);
@@ -202,7 +225,9 @@ pub fn decide_with(
                 dirty = true;
             }
         }
-        HookKind::PreToolUse | HookKind::PostToolUse | HookKind::PostToolBatch if subagent && !st.sub_since_prompt => {
+        HookKind::PreToolUse | HookKind::PostToolUse | HookKind::PostToolBatch
+            if subagent && !st.sub_since_prompt =>
+        {
             st.sub_since_prompt = true;
             dirty = true;
         }
@@ -307,7 +332,12 @@ fn emit(d: Decision) -> ExitCode {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
 mod tests {
     use super::*;
     use crate::state::Machine;
@@ -322,7 +352,10 @@ mod tests {
     fn machine(name: &str) -> (Machine, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("heddle-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        (Machine::at(dir.clone()).expect("a test machine folder"), dir)
+        (
+            Machine::at(dir.clone()).expect("a test machine folder"),
+            dir,
+        )
     }
 
     fn payload(event: &str, extra: Value) -> Vec<u8> {
@@ -346,15 +379,29 @@ mod tests {
     fn a_tool_input_hit_denies_and_then_every_hook_is_braked() {
         let (m, dir) = machine("tool-input");
         let i = inc(b"inc-aaaaaa");
-        let hit = payload("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("echo id {SSN}")}}));
+        let hit = payload(
+            "PreToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": format!("echo id {SSN}")}}),
+        );
         let d = decide_with(HookKind::PreToolUse, &hit, &m, &enrolled(), i).expect("decides");
         assert_eq!(d, Decision::Deny(Msg::Braked(i)));
         // The same conversation is now braked, in any folder, enrolled or not.
-        let clean = payload("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/elsewhere"}));
-        let d = decide_with(HookKind::PreToolUse, &clean, &m, &[], inc(b"inc-bbbbbb")).expect("decides");
+        let clean = payload(
+            "PreToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/elsewhere"}),
+        );
+        let d = decide_with(HookKind::PreToolUse, &clean, &m, &[], inc(b"inc-bbbbbb"))
+            .expect("decides");
         assert_eq!(d, Decision::Deny(Msg::Braked(i)));
         let prompt = payload("UserPromptSubmit", json!({"prompt": "hello"}));
-        let d = decide_with(HookKind::UserPromptSubmit, &prompt, &m, &[], inc(b"inc-cccccc")).expect("decides");
+        let d = decide_with(
+            HookKind::UserPromptSubmit,
+            &prompt,
+            &m,
+            &[],
+            inc(b"inc-cccccc"),
+        )
+        .expect("decides");
         assert_eq!(d, Decision::BlockPrompt(Msg::Braked(i)));
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -367,12 +414,18 @@ mod tests {
         let d = decide_with(HookKind::UserPromptSubmit, &hit, &m, &enrolled(), i).expect("decides");
         assert!(matches!(d, Decision::BlockPrompt(Msg::PromptHeld(_))));
         let exp = payload("UserPromptExpansion", json!({}));
-        let d = decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
+        let d =
+            decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
         assert_eq!(d, Decision::BlockExpansion(Msg::Held));
-        let rewrite = payload("UserPromptSubmit", json!({"prompt": "the same question, without the number"}));
-        let d = decide_with(HookKind::UserPromptSubmit, &rewrite, &m, &enrolled(), i).expect("decides");
+        let rewrite = payload(
+            "UserPromptSubmit",
+            json!({"prompt": "the same question, without the number"}),
+        );
+        let d =
+            decide_with(HookKind::UserPromptSubmit, &rewrite, &m, &enrolled(), i).expect("decides");
         assert_eq!(d, Decision::Pass);
-        let d = decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
+        let d =
+            decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
         assert_eq!(d, Decision::Pass);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -380,8 +433,12 @@ mod tests {
     #[test]
     fn outside_an_enrolled_repo_rule_hits_only_count() {
         let (m, dir) = machine("shadow");
-        let hit = payload("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": format!("echo {SSN}")}}));
-        let d = decide_with(HookKind::PreToolUse, &hit, &m, &[], inc(b"inc-aaaaaa")).expect("decides");
+        let hit = payload(
+            "PreToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": format!("echo {SSN}")}}),
+        );
+        let d =
+            decide_with(HookKind::PreToolUse, &hit, &m, &[], inc(b"inc-aaaaaa")).expect("decides");
         assert_eq!(d, Decision::Pass);
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -390,10 +447,19 @@ mod tests {
     fn a_bash_result_is_replaced_and_a_read_result_halts() {
         let (m, dir) = machine("results");
         let i = inc(b"inc-aaaaaa");
-        let bash = payload("PostToolUse", json!({"tool_name": "Bash", "tool_response": {"stdout": format!("ssn {SSN}"), "stderr": ""}}));
+        let bash = payload(
+            "PostToolUse",
+            json!({"tool_name": "Bash", "tool_response": {"stdout": format!("ssn {SSN}"), "stderr": ""}}),
+        );
         let d = decide_with(HookKind::PostToolUse, &bash, &m, &enrolled(), i).expect("decides");
-        assert!(matches!(d, Decision::ReplaceBash(Msg::ResultWithheld(_, _))));
-        let other = payload("PostToolUse", json!({"session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca1", "tool_name": "Read", "tool_response": {"file": {"content": format!("ssn {SSN}")}}}));
+        assert!(matches!(
+            d,
+            Decision::ReplaceBash(Msg::ResultWithheld(_, _))
+        ));
+        let other = payload(
+            "PostToolUse",
+            json!({"session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca1", "tool_name": "Read", "tool_response": {"file": {"content": format!("ssn {SSN}")}}}),
+        );
         let d = decide_with(HookKind::PostToolUse, &other, &m, &enrolled(), i).expect("decides");
         assert!(matches!(d, Decision::Halt(Msg::ResultWithheld(_, _))));
         let _ = std::fs::remove_dir_all(dir);
@@ -416,7 +482,10 @@ mod tests {
         let (m, dir) = machine("unreadable");
         let conv = ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca0").expect("conv");
         std::fs::write(m.conv_path(&conv), b"fabric-conv 9\nphi clean\nsub 0\n").expect("write");
-        let clean = payload("PreToolUse", json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}));
+        let clean = payload(
+            "PreToolUse",
+            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        );
         let i = inc(b"inc-dddddd");
         let d = decide_with(HookKind::PreToolUse, &clean, &m, &[], i).expect("decides");
         assert_eq!(d, Decision::Deny(Msg::Braked(i)));
@@ -433,7 +502,10 @@ mod tests {
         assert_eq!(block["decision"], "block");
         assert_eq!(block["hookSpecificOutput"]["suppressOriginalPrompt"], true);
         let replace = render(Decision::ReplaceBash(Msg::Fault)).expect("json");
-        assert_eq!(replace["hookSpecificOutput"]["updatedToolOutput"]["isImage"], false);
+        assert_eq!(
+            replace["hookSpecificOutput"]["updatedToolOutput"]["isImage"],
+            false
+        );
         let halt = render(Decision::Halt(Msg::Fault)).expect("json");
         assert_eq!(halt["continue"], false);
     }

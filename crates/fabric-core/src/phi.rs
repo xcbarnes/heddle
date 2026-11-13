@@ -725,7 +725,12 @@ pub fn encode_phi(p: &Phi) -> alloc::string::String {
     let _ = match p {
         Phi::Clean => write!(s, "clean"),
         Phi::Held => write!(s, "held"),
-        Phi::Exposed { incident, cause, hits, acked } => {
+        Phi::Exposed {
+            incident,
+            cause,
+            hits,
+            acked,
+        } => {
             let c = match cause {
                 Cause::ResultMasked => "result_masked",
                 Cause::BatchUnsent => "batch_unsent",
@@ -746,7 +751,11 @@ pub fn decode_phi(line: &[u8]) -> Option<Phi> {
     match line {
         b"clean" => return Some(Phi::Clean),
         b"held" => return Some(Phi::Held),
-        b"sealed" => return Some(Phi::Sealed { reason: SealReason::Confirmed }),
+        b"sealed" => {
+            return Some(Phi::Sealed {
+                reason: SealReason::Confirmed,
+            });
+        }
         _ => {}
     }
     let mut parts = line.split(|b| *b == b' ');
@@ -761,7 +770,10 @@ pub fn decode_phi(line: &[u8]) -> Option<Phi> {
         b"found_later" => Cause::FoundLater,
         _ => return None,
     };
-    let hits = core::str::from_utf8(parts.next()?).ok()?.parse::<u16>().ok()?;
+    let hits = core::str::from_utf8(parts.next()?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
     let acked = match parts.next()? {
         b"0" => false,
         b"1" => true,
@@ -770,7 +782,12 @@ pub fn decode_phi(line: &[u8]) -> Option<Phi> {
     if parts.next().is_some() || hits == 0 {
         return None;
     }
-    Some(Phi::Exposed { incident, cause, hits, acked })
+    Some(Phi::Exposed {
+        incident,
+        cause,
+        hits,
+        acked,
+    })
 }
 
 #[cfg(test)]
