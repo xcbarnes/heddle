@@ -703,7 +703,7 @@ mod tests {
     use alloc::vec::Vec;
 
     // Fixtures that must fire are split across literals, so that heddle's own
-    // repository scan never sees them whole. 987-12-3456 is in a range issued
+    // repository scan never sees them whole. Area 987 with group 12 is a range issued
     // neither as a Social Security number nor as a taxpayer id.
     const SSN_DASHED: &str = concat!("987-12", "-3456");
     const SSN_SPACED: &str = concat!("987 12", " 3456");
