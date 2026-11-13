@@ -65,6 +65,22 @@ jobs:
       - name: At most 40 crates in the tree (crate policy)
         run: test "$(cargo metadata --locked --format-version 1 | jq '.packages | length')" -le 40
 
+  quint:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Quint 0.33.1, pinned by SHA-256
+        run: |
+          curl -fsSLo "$RUNNER_TEMP/quint" https://github.com/informalsystems/quint/releases/download/v0.33.1/quint-linux-amd64
+          echo "acd153075b7edc6fc8f889930c5ff3ebdf94ada381a45a26a2d41b18b9f10db7  $RUNNER_TEMP/quint" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/quint" && echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - run: quint typecheck spec/quint/room.qnt
+      - name: Random runs of the room model, every invariant checked after every step
+        run: quint run spec/quint/room.qnt --invariant=inv --max-samples=2000 --max-steps=40 --seed=0x1
+
   secrets:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
