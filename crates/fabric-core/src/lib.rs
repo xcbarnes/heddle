@@ -10,6 +10,7 @@
 
 extern crate alloc;
 
+pub mod claim;
 pub mod config;
 pub mod ids;
 pub mod restrict;

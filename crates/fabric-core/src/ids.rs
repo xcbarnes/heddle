@@ -16,7 +16,11 @@ fn lower_alnum(b: u8) -> bool {
 fn prefixed<const N: usize>(s: &[u8], prefix: &[u8]) -> Option<[u8; N]> {
     let rest = s.strip_prefix(prefix)?;
     let arr = <[u8; N]>::try_from(rest).ok()?;
-    if arr.iter().all(|b| lower_alnum(*b)) { Some(arr) } else { None }
+    if arr.iter().all(|b| lower_alnum(*b)) {
+        Some(arr)
+    } else {
+        None
+    }
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -143,7 +147,11 @@ impl OpId {
     /// The checked constructor.
     pub fn parse(s: &[u8]) -> Option<OpId> {
         let arr = <[u8; 26]>::try_from(s).ok()?;
-        if arr.iter().all(|b| BASE32.contains(b)) { Some(OpId(arr)) } else { None }
+        if arr.iter().all(|b| BASE32.contains(b)) {
+            Some(OpId(arr))
+        } else {
+            None
+        }
     }
 }
 
@@ -230,6 +238,7 @@ short_name!(
 );
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use alloc::format;
@@ -239,7 +248,15 @@ mod tests {
     fn prefixed_ids_round_trip_and_refuse_everything_else() {
         let t = TaskId::parse(b"fab-k3q9x2");
         assert_eq!(t.map(|t| t.to_string()), Some("fab-k3q9x2".to_string()));
-        for bad in [&b"fab-k3q9x"[..], b"fab-k3q9x22", b"fab-K3Q9X2", b"fab-k3q9x-", b"rec-k3q9x2", b"", b"fab-"] {
+        for bad in [
+            &b"fab-k3q9x"[..],
+            b"fab-k3q9x22",
+            b"fab-K3Q9X2",
+            b"fab-k3q9x-",
+            b"rec-k3q9x2",
+            b"",
+            b"fab-",
+        ] {
             assert_eq!(TaskId::parse(bad), None, "{bad:?}");
         }
         assert!(SeatId::parse(b"s-abcd1234").is_some());
@@ -251,7 +268,10 @@ mod tests {
     #[test]
     fn hex_types_round_trip_and_refuse_upper_case_and_bad_lengths() {
         let s = "0123456789abcdef0123456789abcdef01234567";
-        assert_eq!(Sha::parse(s.as_bytes()).map(|x| x.to_string()), Some(s.to_string()));
+        assert_eq!(
+            Sha::parse(s.as_bytes()).map(|x| x.to_string()),
+            Some(s.to_string())
+        );
         assert!(Sha::parse(s.to_uppercase().as_bytes()).is_none());
         assert!(Sha::parse(&s.as_bytes()[..39]).is_none());
         assert!(Nonce::parse(b"00112233445566778899aabbccddeeff").is_some());
@@ -269,7 +289,10 @@ mod tests {
 
     #[test]
     fn logins_and_machines_are_bounded() {
-        assert_eq!(Login::parse(b"xavier-b").map(|l| l.to_string()), Some("xavier-b".to_string()));
+        assert_eq!(
+            Login::parse(b"xavier-b").map(|l| l.to_string()),
+            Some("xavier-b".to_string())
+        );
         assert!(Login::parse(&[b'a'; 39]).is_some());
         assert!(Login::parse(&[b'a'; 40]).is_none());
         assert!(Login::parse(b"").is_none());
