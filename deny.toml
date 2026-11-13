@@ -37,7 +37,9 @@ allow = [
 ]
 
 [bans.build]
-allow-build-scripts = ["serde_json", "serde_core"]
+# Each one runs code at build time, so each is named. zmij is serde_json's
+# float formatter; its build script was flagged by this check on 2026-11-13.
+allow-build-scripts = ["serde_json", "serde_core", "zmij"]
 executables = "deny"
 include-dependencies = true
 
