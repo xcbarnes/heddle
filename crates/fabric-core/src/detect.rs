@@ -84,7 +84,9 @@ fn alnum_at(t: &[u8], i: usize) -> bool {
     at(t, i).is_some_and(is_alnum)
 }
 fn digit_at(t: &[u8], i: usize) -> Option<u8> {
-    at(t, i).filter(u8::is_ascii_digit).and_then(|b| b.checked_sub(b'0'))
+    at(t, i)
+        .filter(u8::is_ascii_digit)
+        .and_then(|b| b.checked_sub(b'0'))
 }
 fn word_start(t: &[u8], i: usize) -> bool {
     !before(t, i).is_some_and(is_alnum)
@@ -94,7 +96,9 @@ fn line_start(t: &[u8], i: usize) -> bool {
 }
 /// Case-insensitive `pat` (lowercase) at `i`.
 fn starts_ci(t: &[u8], i: usize, pat: &[u8]) -> bool {
-    pat.iter().enumerate().all(|(k, c)| at_off(t, i, k).map(|b| b.to_ascii_lowercase()) == Some(*c))
+    pat.iter()
+        .enumerate()
+        .all(|(k, c)| at_off(t, i, k).map(|b| b.to_ascii_lowercase()) == Some(*c))
 }
 
 /// N digits at `i`, as values.
@@ -186,7 +190,8 @@ fn keyword_near(t: &[u8], start: usize, end: usize, kws: &[&[u8]]) -> bool {
     let hi = end.saturating_add(NEAR).min(t.len());
     (lo..hi).any(|k| {
         kws.iter().any(|kw| {
-            keyword_at(t, k, kw).is_some_and(|ke| ke.saturating_add(NEAR) >= start && k <= end.saturating_add(NEAR))
+            keyword_at(t, k, kw)
+                .is_some_and(|ke| ke.saturating_add(NEAR) >= start && k <= end.saturating_add(NEAR))
         })
     })
 }
@@ -195,7 +200,14 @@ fn keyword_near(t: &[u8], start: usize, end: usize, kws: &[&[u8]]) -> bool {
 fn skip_label_seps(t: &[u8], i: usize) -> usize {
     let mut j = i;
     let limit = i.saturating_add(4);
-    while j < limit && at(t, j).is_some_and(|b| matches!(b, b' ' | b'\t' | b':' | b'#' | b'=' | b'-' | b'.' | b',' | b';')) {
+    while j < limit
+        && at(t, j).is_some_and(|b| {
+            matches!(
+                b,
+                b' ' | b'\t' | b':' | b'#' | b'=' | b'-' | b'.' | b',' | b';'
+            )
+        })
+    {
         j = j.saturating_add(1);
     }
     j
@@ -233,8 +245,13 @@ fn ssn_at(t: &[u8], p: usize) -> Option<Ssn> {
     }
     let dashed = s1.is_some_and(|s| s.0 == Sep::Dash) && s2.is_some_and(|s| s.0 == Sep::Dash);
     // The reserved synthetic forms: area 000 or 666, group 00, serial 0000.
-    let reserved = area == [0, 0, 0] || area == [6, 6, 6] || group == [0, 0] || serial == [0, 0, 0, 0];
-    Some(Ssn { end, dashed, reserved })
+    let reserved =
+        area == [0, 0, 0] || area == [6, 6, 6] || group == [0, 0] || serial == [0, 0, 0, 0];
+    Some(Ssn {
+        end,
+        dashed,
+        reserved,
+    })
 }
 
 const SSN_WORDS: &[&[u8]] = &[b"ssn", b"social security"];
@@ -270,8 +287,19 @@ fn mbi_at(t: &[u8], p: usize) -> Option<usize> {
         Either,
         Digit,
     }
-    const SHAPE: [K; 11] =
-        [K::NonZero, K::Letter, K::Either, K::Digit, K::Letter, K::Either, K::Digit, K::Letter, K::Letter, K::Digit, K::Digit];
+    const SHAPE: [K; 11] = [
+        K::NonZero,
+        K::Letter,
+        K::Either,
+        K::Digit,
+        K::Letter,
+        K::Either,
+        K::Digit,
+        K::Letter,
+        K::Letter,
+        K::Digit,
+        K::Digit,
+    ];
     if !word_start(t, p) {
         return None;
     }
@@ -302,7 +330,12 @@ fn rule_mbi(t: &[u8], p: usize) -> Option<RuleId> {
 
 // ---- R-03: record numbers after their label ----
 
-const MRN_WORDS: &[&[u8]] = &[b"mrn", b"medical record number", b"medical record no", b"patient id"];
+const MRN_WORDS: &[&[u8]] = &[
+    b"mrn",
+    b"medical record number",
+    b"medical record no",
+    b"patient id",
+];
 
 fn rule_mrn(t: &[u8], p: usize) -> Option<RuleId> {
     let end = MRN_WORDS.iter().find_map(|kw| keyword_at(t, p, kw))?;
@@ -323,9 +356,30 @@ fn rule_mrn(t: &[u8], p: usize) -> Option<RuleId> {
 // ---- R-04: a date of birth ----
 
 const MONTHS: &[&[u8]] = &[
-    b"january", b"february", b"march", b"april", b"may", b"june", b"july", b"august", b"september", b"october",
-    b"november", b"december", b"jan", b"feb", b"mar", b"apr", b"jun", b"jul", b"aug", b"sept", b"sep", b"oct",
-    b"nov", b"dec",
+    b"january",
+    b"february",
+    b"march",
+    b"april",
+    b"may",
+    b"june",
+    b"july",
+    b"august",
+    b"september",
+    b"october",
+    b"november",
+    b"december",
+    b"jan",
+    b"feb",
+    b"mar",
+    b"apr",
+    b"jun",
+    b"jul",
+    b"aug",
+    b"sept",
+    b"sep",
+    b"oct",
+    b"nov",
+    b"dec",
 ];
 
 fn date_sep(t: &[u8], i: usize) -> Option<u8> {
@@ -403,9 +457,28 @@ fn rule_dob(t: &[u8], p: usize) -> Option<RuleId> {
 /// Direct-identifier field names, compared with every byte but letters and
 /// digits removed, in lowercase.
 const ID_FIELDS: &[&[u8]] = &[
-    b"firstname", b"lastname", b"givenname", b"familyname", b"fullname", b"patientname", b"dob", b"dateofbirth",
-    b"birthdate", b"ssn", b"socialsecuritynumber", b"mrn", b"medicalrecordnumber", b"memberid", b"subscriberid",
-    b"address", b"streetaddress", b"address1", b"addressline1", b"phone", b"phonenumber", b"telephone",
+    b"firstname",
+    b"lastname",
+    b"givenname",
+    b"familyname",
+    b"fullname",
+    b"patientname",
+    b"dob",
+    b"dateofbirth",
+    b"birthdate",
+    b"ssn",
+    b"socialsecuritynumber",
+    b"mrn",
+    b"medicalrecordnumber",
+    b"memberid",
+    b"subscriberid",
+    b"address",
+    b"streetaddress",
+    b"address1",
+    b"addressline1",
+    b"phone",
+    b"phonenumber",
+    b"telephone",
 ];
 
 /// The field name in `f`, compacted: letters and digits only, lowercase.
@@ -440,7 +513,10 @@ fn rule_header(t: &[u8], p: usize) -> Option<RuleId> {
     let rest = t.get(p..)?;
     let line_len = rest.iter().position(|b| *b == b'\n').unwrap_or(rest.len());
     let line = rest.get(..line_len)?;
-    let delims = line.iter().filter(|b| matches!(b, b',' | b'\t' | b'|' | b';')).count();
+    let delims = line
+        .iter()
+        .filter(|b| matches!(b, b',' | b'\t' | b'|' | b';'))
+        .count();
     if delims < 2 {
         return None;
     }
@@ -462,7 +538,10 @@ fn rule_header(t: &[u8], p: usize) -> Option<RuleId> {
     }
     let next_line = rest.get(line_len..).unwrap_or(&[]);
     let next_line = next_line.get(1..).unwrap_or(&[]);
-    let next_len = next_line.iter().position(|b| *b == b'\n').unwrap_or(next_line.len());
+    let next_len = next_line
+        .iter()
+        .position(|b| *b == b'\n')
+        .unwrap_or(next_line.len());
     let syn_value = next_line.get(..next_len).is_some_and(|l| l.has_syn());
     (found.len() >= 2 && !synthetic && !syn_value).then_some(RuleId::R05)
 }
@@ -549,9 +628,19 @@ fn rule_hl7(t: &[u8], p: usize) -> Option<RuleId> {
         return None;
     }
     let line = t.get(p.checked_add(4)?..)?;
-    let line = line.get(..line.iter().position(|b| *b == b'\r' || *b == b'\n').unwrap_or(line.len()))?;
+    let line = line.get(
+        ..line
+            .iter()
+            .position(|b| *b == b'\r' || *b == b'\n')
+            .unwrap_or(line.len()),
+    )?;
     // PID-2, then PID-3: the first that is not empty is the patient id.
-    let id = line.split(|b| *b == b'|').skip(1).take(2).find(|f| !f.is_empty()).unwrap_or(&[]);
+    let id = line
+        .split(|b| *b == b'|')
+        .skip(1)
+        .take(2)
+        .find(|f| !f.is_empty())
+        .unwrap_or(&[]);
     (!starts_ci(id, 0, b"syn-")).then_some(RuleId::R10)
 }
 
@@ -563,14 +652,19 @@ fn rule_x12(t: &[u8], p: usize) -> Option<RuleId> {
     if !starts_segment || !(rest.starts_with(b"NM1*IL*") || rest.starts_with(b"NM1*QC*")) {
         return None;
     }
-    let seg_len = rest.iter().position(|b| matches!(b, b'~' | b'\n')).unwrap_or(rest.len());
+    let seg_len = rest
+        .iter()
+        .position(|b| matches!(b, b'~' | b'\n'))
+        .unwrap_or(rest.len());
     let seg = rest.get(..seg_len)?;
     let id = seg.split(|b| *b == b'*').nth(9).unwrap_or(&[]);
     if starts_ci(id, 0, b"syn") {
         return None;
     }
     let window = rest.get(..RIGHT.min(rest.len()))?;
-    (0..window.len()).any(|k| window.get(k..).is_some_and(|w| w.starts_with(b"DMG*D8*"))).then_some(RuleId::R11)
+    (0..window.len())
+        .any(|k| window.get(k..).is_some_and(|w| w.starts_with(b"DMG*D8*")))
+        .then_some(RuleId::R11)
 }
 
 /// A FHIR Patient resource, unless its id starts `SYN-`.
@@ -613,7 +707,11 @@ fn decide_at(t: &[u8], p: usize) -> Option<RuleId> {
         _ => None,
     };
     let labelled = || {
-        if first.is_ascii_alphabetic() { rule_mrn(t, p).or_else(|| rule_dob(t, p)) } else { None }
+        if first.is_ascii_alphabetic() {
+            rule_mrn(t, p).or_else(|| rule_dob(t, p))
+        } else {
+            None
+        }
     };
     by_first.or_else(|| rule_header(t, p)).or_else(labelled)
 }
@@ -696,7 +794,11 @@ pub fn detect(text: &[u8]) -> Verdict {
 }
 
 #[cfg(test)]
-#[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing, clippy::disallowed_methods)]
+#[allow(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::disallowed_methods
+)]
 mod tests {
     use super::*;
     use alloc::string::String;
@@ -712,20 +814,43 @@ mod tests {
     const NO: [RuleId; 0] = [];
 
     fn rules(text: &str) -> Vec<RuleId> {
-        detect(text.as_bytes()).hits.iter().flatten().map(|h| h.rule).collect()
+        detect(text.as_bytes())
+            .hits
+            .iter()
+            .flatten()
+            .map(|h| h.rule)
+            .collect()
     }
 
     #[test]
     fn r01_r09_social_security_numbers_and_their_synthetic_forms() {
         assert_eq!(rules(&alloc::format!("ssn: {SSN_DASHED}")), [RuleId::R01]);
-        assert_eq!(rules(&alloc::format!("Social Security {SSN_SPACED}")), [RuleId::R01]);
-        assert_eq!(rules(&alloc::format!("SSN {SSN_BARE} on file")), [RuleId::R01]);
-        assert_eq!(rules(&alloc::format!("id {SSN_DASHED} here")), [RuleId::R09], "dashed, no keyword");
-        assert_eq!(rules(&alloc::format!("id {SSN_SPACED} here")), NO, "spaced needs a keyword");
+        assert_eq!(
+            rules(&alloc::format!("Social Security {SSN_SPACED}")),
+            [RuleId::R01]
+        );
+        assert_eq!(
+            rules(&alloc::format!("SSN {SSN_BARE} on file")),
+            [RuleId::R01]
+        );
+        assert_eq!(
+            rules(&alloc::format!("id {SSN_DASHED} here")),
+            [RuleId::R09],
+            "dashed, no keyword"
+        );
+        assert_eq!(
+            rules(&alloc::format!("id {SSN_SPACED} here")),
+            NO,
+            "spaced needs a keyword"
+        );
         for synthetic in ["000-12-3456", "666-12-3456", "987-00-3456", "987-12-0000"] {
             assert_eq!(rules(&alloc::format!("ssn {synthetic}")), NO, "{synthetic}");
         }
-        assert_eq!(rules(&alloc::format!("ssn 1{SSN_DASHED}")), NO, "part of a longer number");
+        assert_eq!(
+            rules(&alloc::format!("ssn 1{SSN_DASHED}")),
+            NO,
+            "part of a longer number"
+        );
         // A Unicode en dash is the same separator.
         let en = concat!("987\u{2013}12", "\u{2013}3456");
         assert_eq!(rules(&alloc::format!("ssn {en}")), [RuleId::R01]);
@@ -740,7 +865,10 @@ mod tests {
         assert_eq!(rules(&alloc::format!("Medicare id {mbi}")), [RuleId::R02]);
         assert_eq!(rules(&alloc::format!("code {mbi}")), NO, "no keyword");
         assert_eq!(rules(concat!("MRN: A12", "34567")), [RuleId::R03]);
-        assert_eq!(rules(concat!("patient id ", "00123456 seen")), [RuleId::R03]);
+        assert_eq!(
+            rules(concat!("patient id ", "00123456 seen")),
+            [RuleId::R03]
+        );
         assert_eq!(rules(concat!("MRN: SYN-", "1234567")), NO, "synthetic");
         assert_eq!(rules("MRN: 12345"), NO, "too short");
         assert_eq!(rules(concat!("DOB 1957", "-03-02")), [RuleId::R04]);
@@ -751,26 +879,58 @@ mod tests {
 
     #[test]
     fn r05_identifier_fields_in_headers_and_json() {
-        assert_eq!(rules(concat!("first_name,last", "_name,visit\nA,B,C\n")), [RuleId::R05]);
-        assert_eq!(rules(concat!("first_name,last", "_name,synthetic\n")), NO, "a synthetic column");
-        assert_eq!(rules(concat!("first_name,last", "_name,id\nA,B,SYN-1\n")), NO, "a SYN- value");
-        assert_eq!(rules("prose, with commas, about a first name and a last name"), NO);
+        assert_eq!(
+            rules(concat!("first_name,last", "_name,visit\nA,B,C\n")),
+            [RuleId::R05]
+        );
+        assert_eq!(
+            rules(concat!("first_name,last", "_name,synthetic\n")),
+            NO,
+            "a synthetic column"
+        );
+        assert_eq!(
+            rules(concat!("first_name,last", "_name,id\nA,B,SYN-1\n")),
+            NO,
+            "a SYN- value"
+        );
+        assert_eq!(
+            rules("prose, with commas, about a first name and a last name"),
+            NO
+        );
         let json = concat!("{\"first_name\": \"A\", \"dob", "\": \"x\"}");
         assert_eq!(rules(json), [RuleId::R05]);
-        let syn = concat!("{\"first_name\": \"A\", \"dob", "\": \"x\", \"synthetic\": true}");
+        let syn = concat!(
+            "{\"first_name\": \"A\", \"dob",
+            "\": \"x\", \"synthetic\": true}"
+        );
         assert_eq!(rules(syn), NO);
     }
 
     #[test]
     fn r10_r11_r12_record_formats() {
-        assert_eq!(rules(concat!("MSH|^~\\&|x\nPI", "D|1||123456^^^H||DOE^JANE\n")), [RuleId::R10]);
+        assert_eq!(
+            rules(concat!("MSH|^~\\&|x\nPI", "D|1||123456^^^H||DOE^JANE\n")),
+            [RuleId::R10]
+        );
         assert_eq!(rules(concat!("PI", "D|1||SYN-123^^^H||DOE^JANE\n")), NO);
         let x12 = concat!("NM1*IL*1*DOE*JANE****MI*12345", "6789~DMG*D8*19570302*F~");
         assert_eq!(rules(x12), [RuleId::R11]);
         let x12_syn = concat!("NM1*IL*1*DOE*JANE****MI*SYN12", "3~DMG*D8*19570302*F~");
         assert_eq!(rules(x12_syn), NO);
-        assert_eq!(rules(concat!("{\"resourceType\": \"Pat", "ient\", \"id\": \"p1\"}")), [RuleId::R12]);
-        assert_eq!(rules(concat!("{\"resourceType\": \"Pat", "ient\", \"id\": \"SYN-1\"}")), NO);
+        assert_eq!(
+            rules(concat!(
+                "{\"resourceType\": \"Pat",
+                "ient\", \"id\": \"p1\"}"
+            )),
+            [RuleId::R12]
+        );
+        assert_eq!(
+            rules(concat!(
+                "{\"resourceType\": \"Pat",
+                "ient\", \"id\": \"SYN-1\"}"
+            )),
+            NO
+        );
     }
 
     #[test]
@@ -781,7 +941,13 @@ mod tests {
         }
         let v = detect(text.as_bytes());
         assert!(v.more && v.fired());
-        assert_eq!(v.first(), Some(Hit { rule: RuleId::R09, offset: 3 }));
+        assert_eq!(
+            v.first(),
+            Some(Hit {
+                rule: RuleId::R09,
+                offset: 3
+            })
+        );
     }
 
     #[test]
@@ -799,7 +965,21 @@ mod tests {
         let whole = detect(bytes);
         assert!(whole.fired());
         let mut seed = 7u64;
-        for size in [1usize, 2, 3, 5, 64, 511, 512, 513, 2047, 2048, 2049, 4096, bytes.len()] {
+        for size in [
+            1usize,
+            2,
+            3,
+            5,
+            64,
+            511,
+            512,
+            513,
+            2047,
+            2048,
+            2049,
+            4096,
+            bytes.len(),
+        ] {
             let mut s = ScanState::new();
             for chunk in bytes.chunks(size) {
                 s = detect_step(s, chunk);
@@ -810,7 +990,9 @@ mod tests {
             let mut s = ScanState::new();
             let mut i = 0;
             while i < bytes.len() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let n = 1 + usize::try_from(seed >> 52).unwrap_or(1);
                 let j = (i + n).min(bytes.len());
                 s = detect_step(s, &bytes[i..j]);
@@ -825,7 +1007,9 @@ mod tests {
         let mut seed = 1u64;
         let mut junk = Vec::new();
         for _ in 0..20_000 {
-            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             junk.push(u8::try_from(seed >> 56).unwrap_or(0));
         }
         let _ = detect(&junk);
