@@ -176,9 +176,18 @@ mod tests {
     #[test]
     fn the_constructor_refuses_each_broken_rule() {
         let ok = *Config::V01.get();
-        let silence_zero = RawConfig { silence_cap: 0, ..ok };
-        let silence_big = RawConfig { silence_cap: ok.lease + 1, ..ok };
-        let quiet_small = RawConfig { quiet_max: ok.lease - 1, ..ok };
+        let silence_zero = RawConfig {
+            silence_cap: 0,
+            ..ok
+        };
+        let silence_big = RawConfig {
+            silence_cap: ok.lease + 1,
+            ..ok
+        };
+        let quiet_small = RawConfig {
+            quiet_max: ok.lease - 1,
+            ..ok
+        };
         let grace_zero = RawConfig { grace: 0, ..ok };
         let cap_zero = RawConfig { max_batch: 0, ..ok };
         assert_eq!(Config::new(silence_zero), Err(ConfigError::SilenceCap));

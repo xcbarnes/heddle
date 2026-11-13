@@ -49,7 +49,11 @@ pub struct Clocks {
 pub fn advance(c: Clocks, now: RoomTime, frozen: bool, cfg: &Config) -> Clocks {
     let eff = if now > c.last_now { now } else { c.last_now };
     let dt = eff.0.saturating_sub(c.last_now.0);
-    let by = if frozen { 0 } else { dt.min(cfg.get().silence_cap) };
+    let by = if frozen {
+        0
+    } else {
+        dt.min(cfg.get().silence_cap)
+    };
     Clocks {
         last_now: eff,
         lease_clock: c.lease_clock.plus(by),
@@ -69,7 +73,10 @@ mod tests {
             for now in 0..12u64 {
                 for lc in [0, 7, u64::MAX - 1, u64::MAX] {
                     for frozen in [false, true] {
-                        let c = Clocks { last_now: RoomTime(last), lease_clock: LeaseTime(lc) };
+                        let c = Clocks {
+                            last_now: RoomTime(last),
+                            lease_clock: LeaseTime(lc),
+                        };
                         let d = advance(c, RoomTime(now), frozen, &cfg);
                         assert!(d.lease_clock >= c.lease_clock, "K1");
                         let moved = d.lease_clock.0 - c.lease_clock.0;
@@ -85,7 +92,10 @@ mod tests {
     #[test]
     fn a_two_hour_sleep_costs_a_lease_at_most_two_minutes() {
         let cfg = Config::V01;
-        let c = Clocks { last_now: RoomTime(1_000), lease_clock: LeaseTime(50) };
+        let c = Clocks {
+            last_now: RoomTime(1_000),
+            lease_clock: LeaseTime(50),
+        };
         let d = advance(c, RoomTime(1_000 + 2 * 3_600_000), false, &cfg);
         assert_eq!(d.lease_clock, LeaseTime(50 + 120_000));
     }

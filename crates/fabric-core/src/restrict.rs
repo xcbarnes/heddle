@@ -99,21 +99,39 @@ pub fn level(r: &Restrictions, last_now: RoomTime, cfg: &Config) -> Level {
 pub fn mark(r: Restrictions, slot: Slot, seq: Seq, now: RoomTime) -> Restrictions {
     let touch = |old: Option<Mark>| {
         Some(match old {
-            Some(m) => Mark { seq, first_at: m.first_at },
+            Some(m) => Mark {
+                seq,
+                first_at: m.first_at,
+            },
             None => Mark { seq, first_at: now },
         })
     };
     match slot {
-        Slot::AgentPause => Restrictions { agent_pause: touch(r.agent_pause), ..r },
-        Slot::AgentStop => Restrictions { agent_stop: touch(r.agent_stop), ..r },
-        Slot::PersonPause => Restrictions { person_pause: touch(r.person_pause), ..r },
-        Slot::PersonStop => Restrictions { person_stop: touch(r.person_stop), ..r },
+        Slot::AgentPause => Restrictions {
+            agent_pause: touch(r.agent_pause),
+            ..r
+        },
+        Slot::AgentStop => Restrictions {
+            agent_stop: touch(r.agent_stop),
+            ..r
+        },
+        Slot::PersonPause => Restrictions {
+            person_pause: touch(r.person_pause),
+            ..r
+        },
+        Slot::PersonStop => Restrictions {
+            person_stop: touch(r.person_stop),
+            ..r
+        },
     }
 }
 
 fn merge(into: Option<Mark>, m: Mark) -> Mark {
     match into {
-        Some(p) => Mark { seq: p.seq.max(m.seq), first_at: p.first_at.min(m.first_at) },
+        Some(p) => Mark {
+            seq: p.seq.max(m.seq),
+            first_at: p.first_at.min(m.first_at),
+        },
         None => m,
     }
 }
@@ -122,10 +140,18 @@ fn merge(into: Option<Mark>, m: Mark) -> Mark {
 /// person slot, merging with it if it is occupied. `None` is `NoSuchMark`.
 pub fn confirm(r: Restrictions, seq: Seq) -> Option<Restrictions> {
     if let Some(m) = r.agent_pause.filter(|m| m.seq == seq) {
-        return Some(Restrictions { agent_pause: None, person_pause: Some(merge(r.person_pause, m)), ..r });
+        return Some(Restrictions {
+            agent_pause: None,
+            person_pause: Some(merge(r.person_pause, m)),
+            ..r
+        });
     }
     if let Some(m) = r.agent_stop.filter(|m| m.seq == seq) {
-        return Some(Restrictions { agent_stop: None, person_stop: Some(merge(r.person_stop, m)), ..r });
+        return Some(Restrictions {
+            agent_stop: None,
+            person_stop: Some(merge(r.person_stop, m)),
+            ..r
+        });
     }
     None
 }
@@ -151,10 +177,24 @@ mod tests {
     #[test]
     fn p3_an_agent_stop_decays_to_a_pause_and_a_person_stop_never_does() {
         let decay = CFG.get().stop_decay;
-        let agent = mark(Restrictions::default(), Slot::AgentStop, Seq(1), RoomTime(10));
-        let person = mark(Restrictions::default(), Slot::PersonStop, Seq(1), RoomTime(10));
+        let agent = mark(
+            Restrictions::default(),
+            Slot::AgentStop,
+            Seq(1),
+            RoomTime(10),
+        );
+        let person = mark(
+            Restrictions::default(),
+            Slot::PersonStop,
+            Seq(1),
+            RoomTime(10),
+        );
         for t in 10..10 + 3 * decay {
-            let want = if t - 10 < decay { Level::Stopped } else { Level::Paused };
+            let want = if t - 10 < decay {
+                Level::Stopped
+            } else {
+                Level::Paused
+            };
             assert_eq!(level(&agent, RoomTime(t), &CFG), want);
             assert_eq!(level(&person, RoomTime(t), &CFG), Level::Stopped);
         }
@@ -166,7 +206,11 @@ mod tests {
         let mut r = Restrictions::default();
         for t in 0..4 * decay {
             r = mark(r, Slot::AgentStop, Seq(t + 1), RoomTime(t));
-            let want = if t < decay { Level::Stopped } else { Level::Paused };
+            let want = if t < decay {
+                Level::Stopped
+            } else {
+                Level::Paused
+            };
             assert_eq!(level(&r, RoomTime(t), &CFG), want);
             assert_eq!(r.agent_stop.map(|m| m.first_at), Some(RoomTime(0)));
         }
@@ -174,23 +218,48 @@ mod tests {
 
     #[test]
     fn p8_resume_never_clears_a_mark_set_after_the_person_looked() {
-        let r = mark(Restrictions::default(), Slot::AgentPause, Seq(3), RoomTime(0));
+        let r = mark(
+            Restrictions::default(),
+            Slot::AgentPause,
+            Seq(3),
+            RoomTime(0),
+        );
         let r = mark(r, Slot::PersonStop, Seq(5), RoomTime(1));
         let after = resume(r, Seq(4));
         assert_eq!(after.agent_pause, None);
-        assert_eq!(after.person_stop, Some(Mark { seq: Seq(5), first_at: RoomTime(1) }));
+        assert_eq!(
+            after.person_stop,
+            Some(Mark {
+                seq: Seq(5),
+                first_at: RoomTime(1)
+            })
+        );
         assert_eq!(resume(after, Seq(5)), Restrictions::default());
     }
 
     #[test]
     fn confirm_moves_and_merges_and_refuses_an_unknown_seq() {
-        let r = mark(Restrictions::default(), Slot::AgentStop, Seq(2), RoomTime(7));
+        let r = mark(
+            Restrictions::default(),
+            Slot::AgentStop,
+            Seq(2),
+            RoomTime(7),
+        );
         let r = mark(r, Slot::PersonStop, Seq(4), RoomTime(9));
         let c = confirm(r, Seq(2));
-        let want = Restrictions { person_stop: Some(Mark { seq: Seq(4), first_at: RoomTime(7) }), ..Restrictions::default() };
+        let want = Restrictions {
+            person_stop: Some(Mark {
+                seq: Seq(4),
+                first_at: RoomTime(7),
+            }),
+            ..Restrictions::default()
+        };
         assert_eq!(c, Some(want));
         assert_eq!(confirm(r, Seq(3)), None);
         // A confirmed stop no longer decays.
-        assert_eq!(c.map(|x| level(&x, RoomTime(1_000), &CFG)), Some(Level::Stopped));
+        assert_eq!(
+            c.map(|x| level(&x, RoomTime(1_000), &CFG)),
+            Some(Level::Stopped)
+        );
     }
 }
