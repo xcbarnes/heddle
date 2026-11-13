@@ -1,0 +1,22 @@
+# Methods that can panic, and types whose iteration order is not fixed
+# (state_machines.md §0). "usize or isize in any stored or wire type" cannot be
+# said to clippy; it is checked by review and by `spec/` tests on the types.
+disallowed-methods = [
+  { path = "slice::split_at", reason = "panics; use split_at_checked" },
+  { path = "slice::split_at_mut", reason = "panics; use split_at_mut_checked" },
+  { path = "slice::copy_from_slice", reason = "panics on a length mismatch" },
+  { path = "slice::clone_from_slice", reason = "panics on a length mismatch" },
+  { path = "slice::chunks", reason = "panics on a zero size" },
+  { path = "slice::windows", reason = "panics on a zero size" },
+  { path = "str::split_at", reason = "panics; use split_at_checked" },
+  { path = "alloc::vec::Vec::remove", reason = "panics out of range" },
+  { path = "alloc::vec::Vec::swap_remove", reason = "panics out of range" },
+  { path = "alloc::vec::Vec::insert", reason = "panics out of range" },
+  { path = "alloc::vec::Vec::split_off", reason = "panics out of range" },
+  { path = "alloc::vec::Vec::drain", reason = "panics out of range" },
+  { path = "alloc::collections::VecDeque::remove", reason = "use pop_front or pop_back" },
+]
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "iteration order is not fixed; use BTreeMap" },
+  { path = "std::collections::HashSet", reason = "iteration order is not fixed; use BTreeSet" },
+]

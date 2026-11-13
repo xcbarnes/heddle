@@ -1,0 +1,7 @@
+# Pinned. 1.100.0 shipped 2026-11-12; this is the newest release that is at
+# least seven days old (the crate policy's rule, applied to the toolchain too).
+[toolchain]
+channel = "1.99.1"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]

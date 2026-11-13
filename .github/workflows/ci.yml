@@ -1,0 +1,82 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Toolchain, pinned by rust-toolchain.toml
+        run: rustup toolchain install && cargo --version && rustc --version
+      # Until the Mac has a toolchain, CI hands back the lockfile and the
+      # formatter's changes as a patch; the last step fails if there is one.
+      - name: Lockfile and formatting, as a patch
+        run: |
+          cargo metadata --format-version 1 > /dev/null
+          cargo fmt --all
+          git diff > ci.patch
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-patch
+          path: ci.patch
+          if-no-files-found: ignore
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
+      - name: The core builds for WebAssembly without the standard library
+        run: cargo build -p fabric-core --target wasm32-unknown-unknown --locked --release
+      - name: No drift from the committed lockfile and formatting
+        run: test ! -s ci.patch || { cat ci.patch; exit 1; }
+
+  supply-chain:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: cargo-deny 0.20.2 and cargo-audit 0.22.2, pinned by SHA-256
+        run: |
+          curl -fsSLo deny.tgz https://github.com/EmbarkStudios/cargo-deny/releases/download/0.20.2/cargo-deny-0.20.2-x86_64-unknown-linux-musl.tar.gz
+          curl -fsSLo audit.tgz https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz
+          printf '%s  deny.tgz\n%s  audit.tgz\n' 9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f 7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428 | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin" && tar xzf deny.tgz -C "$RUNNER_TEMP/bin" --strip-components=1 && tar xzf audit.tgz -C "$RUNNER_TEMP/bin" --strip-components=1
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+      - run: rustup toolchain install
+      - run: cargo deny --locked check
+      - run: cargo audit --deny warnings
+      - name: At most 40 crates in the tree (crate policy)
+        run: test "$(cargo metadata --locked --format-version 1 | jq '.packages | length')" -le 40
+
+  secrets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Betterleaks 1.10.0, pinned by SHA-256
+        run: |
+          curl -fsSLo bl.tgz https://github.com/betterleaks/betterleaks/releases/download/v1.10.0/betterleaks_1.10.0_linux_x64.tar.gz
+          echo "9d9ad503cd5d80d18a939352266c3fcca52f10da9b83cd5cfe646989b13940fe  bl.tgz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bl" && tar xzf bl.tgz -C "$RUNNER_TEMP/bl"
+      - name: Scan every commit, printing no secret
+        run: '"$RUNNER_TEMP/bl/betterleaks" git . --redact'

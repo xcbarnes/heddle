@@ -1,0 +1,46 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+license = "Apache-2.0"
+repository = "https://github.com/xcbarnes/heddle"
+publish = false
+
+# The lint wall (v01_architecture.md §9.1). Lints are syntactic: they rule out
+# the listed panic sources, they do not prove panic-freedom.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+unused_must_use = "deny"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unreachable = "deny"
+unimplemented = "deny"
+indexing_slicing = "deny"
+string_slice = "deny"
+arithmetic_side_effects = "deny"
+float_arithmetic = "deny"
+as_conversions = "deny"
+wildcard_enum_match_arm = "deny"
+disallowed_methods = "deny"
+disallowed_types = "deny"
+exit = "deny"
+mem_forget = "deny"
+
+[profile.dev]
+overflow-checks = true
+
+[profile.release]
+overflow-checks = true
+debug = false
+strip = true
+lto = true
+codegen-units = 1
