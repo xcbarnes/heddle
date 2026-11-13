@@ -1,0 +1,12 @@
+[package]
+name = "fabric-core"
+description = "Fabric's pure core: every rule as a total function, no I/O, no clock, no panics"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
