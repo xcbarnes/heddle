@@ -1,0 +1,17 @@
+[package]
+name = "heddle"
+description = "Fabric's command-line tool, wired into the harness's hooks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+fabric-core = { path = "../fabric-core" }
+# Harness payloads only (crate policy). No derive: the payload is read as a Value.
+serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

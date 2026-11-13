@@ -14,6 +14,7 @@ pub mod asset;
 pub mod claim;
 pub mod config;
 pub mod detect;
+pub mod hook;
 pub mod ids;
 pub mod link;
 pub mod phi;

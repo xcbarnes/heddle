@@ -718,6 +718,61 @@ pub fn source_denied(s: &SourceIncident) -> bool {
     }
 }
 
+/// A label as one line of text, for the file that holds it (L0).
+pub fn encode_phi(p: &Phi) -> alloc::string::String {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let _ = match p {
+        Phi::Clean => write!(s, "clean"),
+        Phi::Held => write!(s, "held"),
+        Phi::Exposed { incident, cause, hits, acked } => {
+            let c = match cause {
+                Cause::ResultMasked => "result_masked",
+                Cause::BatchUnsent => "batch_unsent",
+                Cause::ToolInput => "tool_input",
+                Cause::FoundLater => "found_later",
+            };
+            write!(s, "exposed {incident} {c} {hits} {}", u8::from(*acked))
+        }
+        Phi::Sealed { .. } => write!(s, "sealed"),
+    };
+    s
+}
+
+/// The checked reader for [`encode_phi`]. `None` for anything else; the
+/// caller reads `None` as braked (V5), never as Clean.
+pub fn decode_phi(line: &[u8]) -> Option<Phi> {
+    let line = line.trim_ascii();
+    match line {
+        b"clean" => return Some(Phi::Clean),
+        b"held" => return Some(Phi::Held),
+        b"sealed" => return Some(Phi::Sealed { reason: SealReason::Confirmed }),
+        _ => {}
+    }
+    let mut parts = line.split(|b| *b == b' ');
+    if parts.next()? != b"exposed" {
+        return None;
+    }
+    let incident = IncidentId::parse(parts.next()?)?;
+    let cause = match parts.next()? {
+        b"result_masked" => Cause::ResultMasked,
+        b"batch_unsent" => Cause::BatchUnsent,
+        b"tool_input" => Cause::ToolInput,
+        b"found_later" => Cause::FoundLater,
+        _ => return None,
+    };
+    let hits = core::str::from_utf8(parts.next()?).ok()?.parse::<u16>().ok()?;
+    let acked = match parts.next()? {
+        b"0" => false,
+        b"1" => true,
+        _ => return None,
+    };
+    if parts.next().is_some() || hits == 0 {
+        return None;
+    }
+    Some(Phi::Exposed { incident, cause, hits, acked })
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -817,6 +872,25 @@ mod tests {
             Phi::Held => 1,
             Phi::Exposed { .. } => 2,
             Phi::Sealed { .. } => 3,
+        }
+    }
+
+    #[test]
+    fn v5_the_label_file_round_trips_and_anything_else_reads_as_none() {
+        for p in labels() {
+            assert_eq!(decode_phi(encode_phi(&p).as_bytes()), Some(p), "{p:?}");
+        }
+        for bad in [
+            &b""[..],
+            b"Clean",
+            b"exposed",
+            b"exposed inc-aaaaaa tool_input 0 0",
+            b"exposed inc-aaaaaa tool_input 1 2",
+            b"exposed inc-aaaaaa tool_input 1 0 extra",
+            b"exposed inc-aaaaaa leaked 1 0",
+            b"exposed inc-AAAAAA tool_input 1 0",
+        ] {
+            assert_eq!(decode_phi(bad), None, "{bad:?}");
         }
     }
 
