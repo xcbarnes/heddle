@@ -20,11 +20,11 @@ Fabric has two planes. The *lasting* plane is git and markdown: task files and r
 | `crates/fabric-core` | the pure core: types, grammars, every state machine, `render`, `detect`, `flow` |
 | `day0/` | the day-0 hook tests against the pinned Claude Code, and [their results](day0/RESULTS.md) |
 | `adapters/claude-code/` | recorded hook payloads, for the decoder tests |
-| `crates/heddle` | the command-line tool; today, the PHI hook path |
+| `crates/heddle` | the command-line tool: the hook lines, and `setup`, `doctor`, `repair`, `uninstall`, `status` and `phi recheck` |
 | `spec/` | the Quint model of the room, the detector's rules, and the JSON differential test |
 | `.github/workflows/ci.yml` | lints, tests, the WebAssembly build, the JSON differential test and the no-third-party-crates check |
 
-Still to come in v0.1: `setup`, `doctor`, `repair`, `uninstall`, the local room, and the agent verbs.
+Still to come in v0.1: the local room and the agent verbs (claims, news, `done`).
 
 ## Building
 
