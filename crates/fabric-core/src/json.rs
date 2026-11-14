@@ -646,6 +646,7 @@ mod tests {
             include_str!("../../../adapters/claude-code/payloads/SessionStart-clear.json"),
             include_str!("../../../adapters/claude-code/payloads/UserPromptExpansion.json"),
             include_str!("../../../adapters/claude-code/payloads/PreCompact.json"),
+            include_str!("../../../adapters/claude-code/payloads/ConfigChange.json"),
         ] {
             let v = ok(p);
             assert!(v.get("session_id").and_then(Value::as_str).is_some());

@@ -672,6 +672,7 @@ mod tests {
             (HookKind::PostToolUse, recorded!("PostToolUse")),
             (HookKind::PostToolBatch, recorded!("PostToolBatch")),
             (HookKind::PreCompact, recorded!("PreCompact")),
+            (HookKind::ConfigChange, recorded!("ConfigChange")),
         ] {
             assert_eq!(
                 decide_with(kind, raw, &m, inc(b"inc-aaaaaa")).ok(),

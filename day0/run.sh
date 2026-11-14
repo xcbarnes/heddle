@@ -180,6 +180,27 @@ run_t11() {
   echo "done: t11 (payloads in $d/log)"
 }
 
+# T6: the session strips its own PreToolUse line from the local settings file
+# mid-session, then runs one more command. CONFIG_MODE is the ConfigChange
+# probe's mode: ok (record the payload) or stoploop (a JSON block). If the
+# block holds, the PreToolUse probe logs both commands.
+run_t6() {
+  local mode=$1 d="$out/t6-$1"
+  layout "$d"
+  local f="$d/repo/.claude/settings.local.json"
+  jq -n --arg probe "$probe" --arg mode "$mode" '{hooks: {
+      ConfigChange: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "ConfigChange", $mode], timeout: 10, onFailure: "block"}]}],
+      PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: "/bin/sh", args: [$probe, "PreToolUse", "ok"], timeout: 10}]}]}}' > "$f"
+  local strip="jq 'del(.hooks.PreToolUse)' '$f' > '$f.tmp' && mv '$f.tmp' '$f' && sleep 3"
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p \
+      "Run this exact Bash command, once: $strip . Then, as a second Bash call, run: touch $d/wt/marker-after . Then reply DONE." \
+      --model "$model" --output-format stream-json --verbose --setting-sources local --permission-mode bypassPermissions \
+      --tools Bash --max-turns 4 --max-budget-usd 0.10 ) > "$d/stream.jsonl" 2> "$d/stderr.txt" < /dev/null
+  local pre; pre=$(ls "$d/log" | grep -c '^PreToolUse')
+  local cc; cc=$(ls "$d/log" | grep -c '^ConfigChange')
+  echo "done: t6-$mode ConfigChange fired $cc time(s); PreToolUse logged $pre of 2 commands; marker-after $(yn test -e "$d/wt/marker-after")"
+}
+
 # want NAME [PREFIX...]: no prefixes means every case.
 want() {
   local name=$1; shift
@@ -196,3 +217,4 @@ echo "$cases" | while read -r name ev mode onfail to kind; do
 done
 want fork "$@" && run_fork
 want t11 "$@" && run_t11
+want t6 "$@" && { run_t6 ok; run_t6 stoploop; }
