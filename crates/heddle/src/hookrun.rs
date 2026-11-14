@@ -380,6 +380,21 @@ pub fn decide_with(
         return Ok(d);
     }
 
+    // The seatbelts: a command that would switch the brake off by accident.
+    if kind == HookKind::PreToolUse
+        && tool == "Bash"
+        && let Some(belt) = v
+            .get("tool_input")
+            .and_then(|i| i.get("command"))
+            .and_then(Value::as_str)
+            .and_then(hook::seatbelt)
+    {
+        if dirty {
+            machine.write_conv(&conv, &st).map_err(|_| Fault)?;
+        }
+        return Ok(Decision::Deny(Msg::Seatbelt(belt)));
+    }
+
     // The pre-filter on this hook's text.
     let ctx = ScanCtx {
         person_typed,

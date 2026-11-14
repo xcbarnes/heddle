@@ -94,6 +94,73 @@ pub enum Msg {
     Hiccup,
     /// Hook line 9 refused a settings change that would remove heddle's lines.
     WiringKept,
+    /// A Bash command matched a seatbelt.
+    Seatbelt(Seatbelt),
+}
+
+/// A Bash command that would switch the brake off by accident (§5 item 4).
+/// A match on command text: a seatbelt, not a boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Seatbelt {
+    /// A nested `claude` that skips this project's settings.
+    NestedClaude,
+    /// A git command that deletes ignored files, the local settings among them.
+    DeletesIgnored,
+}
+
+/// Check each simple command in `command` (split at `;`, `&`, `|` and line
+/// breaks) for a seatbelt.
+pub fn seatbelt(command: &str) -> Option<Seatbelt> {
+    command.split([';', '&', '|', '\n']).find_map(|part| {
+        let mut words = part.split_whitespace().skip_while(|w| {
+            w.contains('=') && !w.starts_with('-')
+                || matches!(*w, "env" | "exec" | "command" | "nohup" | "time")
+        });
+        let program = words.next()?;
+        let name = program
+            .rsplit('/')
+            .next()
+            .unwrap_or(program)
+            .trim_matches(['"', '\'']);
+        let args: alloc::vec::Vec<&str> = words.map(|w| w.trim_matches(['"', '\''])).collect();
+        match name {
+            "claude" => args
+                .iter()
+                .any(|a| {
+                    *a == "--bare"
+                        || ["--settings", "--setting-sources"].iter().any(|f| {
+                            *a == *f || a.strip_prefix(f).is_some_and(|r| r.starts_with('='))
+                        })
+                })
+                .then_some(Seatbelt::NestedClaude),
+            "git" => {
+                // Skip git's own options: `-C <path>`, `-c <k=v>` and flags.
+                let mut rest = args.iter().copied();
+                let sub = loop {
+                    match rest.next()? {
+                        "-C" | "-c" | "--git-dir" | "--work-tree" => {
+                            rest.next()?;
+                        }
+                        w if w.starts_with('-') => {}
+                        w => break w,
+                    }
+                };
+                let opts: alloc::vec::Vec<&str> = rest.collect();
+                let short = |c: char| {
+                    opts.iter()
+                        .any(|o| o.starts_with('-') && !o.starts_with("--") && o.contains(c))
+                };
+                let long = |l: &str| opts.contains(&l);
+                let deletes = match sub {
+                    "clean" => (short('x') || short('X')) && !short('n') && !long("--dry-run"),
+                    "stash" => short('a') || long("--all"),
+                    _ => false,
+                };
+                deletes.then_some(Seatbelt::DeletesIgnored)
+            }
+            _ => None,
+        }
+    })
 }
 
 /// What a hook prints. `Pass` prints nothing at all: on several events plain
@@ -187,6 +254,16 @@ pub fn text(m: &Msg) -> String {
              were withheld. {SYNTHETIC} The conversation goes on with your next message."
         ),
         Msg::Hiccup => write!(s, "Fabric had a hiccup and found nothing. Try it again."),
+        Msg::Seatbelt(Seatbelt::NestedClaude) => write!(
+            s,
+            "Fabric stopped this command: it starts Claude without this project's settings, which would \
+             leave Fabric's checks behind. If your person wants it, they can run it themselves."
+        ),
+        Msg::Seatbelt(Seatbelt::DeletesIgnored) => write!(
+            s,
+            "Fabric stopped this command: it deletes ignored files, and this project's Fabric settings are \
+             one of them. Leave out -x, -X or --all, or ask your person to run it themselves."
+        ),
         Msg::WiringKept => write!(
             s,
             "Fabric kept this project's settings as they were for this session: the change would remove its \
@@ -535,6 +612,40 @@ mod tests {
             }
         );
         assert!(on_hit(HookKind::PreToolUse, RuleId::R08, &ctx(), inc()).is_none());
+    }
+
+    #[test]
+    fn the_seatbelts_catch_a_nested_claude_without_settings_and_deleting_ignored_files() {
+        for c in [
+            "claude --bare -p hi",
+            "cd x && claude --settings '{}' -p hi",
+            "FOO=1 /usr/local/bin/claude --setting-sources=user",
+            "env claude --settings=/tmp/s.json",
+        ] {
+            assert_eq!(seatbelt(c), Some(Seatbelt::NestedClaude), "{c}");
+        }
+        for c in [
+            "git clean -fdx",
+            "git -C repo clean -X -f",
+            "make; git clean -xf",
+            "git stash -a",
+            "git stash push --all",
+        ] {
+            assert_eq!(seatbelt(c), Some(Seatbelt::DeletesIgnored), "{c}");
+        }
+        for c in [
+            "claude -p hi",
+            "git clean -fd",
+            "git clean -ndX",
+            "git clean -xf --dry-run",
+            "git stash -u",
+            "git status",
+            "echo git clean -fdx",
+            "grep -r 'claude --bare' notes",
+            "",
+        ] {
+            assert_eq!(seatbelt(c), None, "{c}");
+        }
     }
 
     #[test]
