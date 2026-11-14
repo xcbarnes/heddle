@@ -61,6 +61,22 @@ jobs:
           path: target/release/heddle
           retention-days: 7
 
+  # Crate sources for offline local builds (decision D36): vendored here from
+  # the locked versions. Cargo checks every vendored file against Cargo.lock.
+  vendor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install && cargo vendor --locked --versioned-dirs vendor > /dev/null && tar czf vendor.tgz vendor
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: vendor-sources
+          path: vendor.tgz
+          retention-days: 30
+
   supply-chain:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
