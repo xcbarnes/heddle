@@ -685,7 +685,8 @@ fn read_from(path: &Path, from: u64) -> Option<Vec<u8>> {
 }
 
 /// The files a prompt names with `@`: Claude Code adds them without a tool
-/// call. Paths are taken relative to the session's folder.
+/// call. Paths are taken relative to the session's folder; files over 1 MiB
+/// are skipped.
 fn at_files(prompt: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
     prompt
         .split_whitespace()
@@ -696,7 +697,8 @@ fn at_files(prompt: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
             Some(c) if !w.starts_with('/') => c.join(w),
             Some(_) | None => PathBuf::from(w),
         })
-        .filter(|p| p.is_file())
+        // Count-only, so a large file is skipped rather than slowing the prompt.
+        .filter(|p| std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.len() <= 1024 * 1024))
         .take(16)
         .collect()
 }
