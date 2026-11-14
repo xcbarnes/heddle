@@ -30,5 +30,18 @@ case $mode in
   replace)  printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"PostToolUse","updatedToolOutput":{"stdout":"[probe replaced this output]","stderr":"","interrupted":false,"isImage":false}}}'; exit 0 ;;
   stoploop) printf '%s\n' '{"decision":"block","reason":"probe: loop stopped"}'; exit 0 ;;
   blockprompt) printf '%s\n' '{"decision":"block","reason":"probe: prompt held","hookSpecificOutput":{"hookEventName":"UserPromptSubmit","suppressOriginalPrompt":true}}'; exit 0 ;;
+  # T19: hand later Bash calls the conversation's id, two ways.
+  envfile)  sid=$(sed -n 's/.*"session_id" *: *"\([^"]*\)".*/\1/p' "$f" | head -1)
+            if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
+              printf 'export FABRIC_SEAT=%s\n' "$sid" >> "$CLAUDE_ENV_FILE"; echo "set" > "$f.envfile"
+            else
+              echo "no CLAUDE_ENV_FILE" > "$f.envfile"
+            fi
+            exit 0 ;;
+  rewrite)  /usr/bin/python3 -I -c 'import json, sys
+p = json.load(open(sys.argv[1]))
+ti = dict(p["tool_input"], command="export FABRIC_SEAT=%s; %s" % (p["session_id"], p["tool_input"]["command"]))
+print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow", "updatedInput": ti}}))' "$f"
+            exit 0 ;;
   *)        echo "probe: unknown mode" >&2; exit 1 ;;
 esac

@@ -201,6 +201,59 @@ run_t6() {
   echo "done: t6-$mode ConfigChange fired $cc time(s); PreToolUse logged $pre of 2 commands; marker-after $(yn test -e "$d/wt/marker-after")"
 }
 
+# T19: does a Bash call learn its conversation's id? envfile: a SessionStart
+# hook appends `export FABRIC_SEAT=<id>` to $CLAUDE_ENV_FILE. rewrite: a
+# PreToolUse hook prefixes the command with it (updatedInput). Bypass mode,
+# because outside it Claude Code refuses an unallowed command that expands a
+# variable ("can't be checked before it runs") and the call never runs.
+run_t19() {
+  local how=$1 d="$out/t19-$1"
+  layout "$d"
+  local ss=ok pre=ok
+  [ "$how" = envfile ] && ss=envfile
+  [ "$how" = rewrite ] && pre=rewrite
+  jq -n --arg probe "$probe" --arg ss "$ss" --arg pre "$pre" '{hooks: {
+      SessionStart: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "SessionStart", $ss], timeout: 10}]}],
+      PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: "/bin/sh", args: [$probe, "PreToolUse", $pre], timeout: 10}]}]}}' \
+    > "$d/repo/.claude/settings.local.json"
+  local id; id=$(uuidgen | tr 'A-Z' 'a-z')
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p \
+      'Run exactly this Bash command, once, and nothing else: `echo seat=$FABRIC_SEAT` Then reply with exactly what it printed.' \
+      --session-id "$id" --model "$model" --output-format stream-json --verbose --setting-sources local \
+      --tools Bash --permission-mode bypassPermissions --max-turns 3 --max-budget-usd 0.05 ) \
+    > "$d/stream.jsonl" 2> "$d/stderr.txt" < /dev/null
+  local seen; seen=$(jq -r 'select(.type=="user") | .message.content[]? | select(.type=="tool_result") | .content | if type=="array" then (map(.text? // "") | join(" ")) else . end' "$d/stream.jsonl" 2>/dev/null | tr '\n' ' ')
+  local got=no; case $seen in *"seat=$id"*) got=yes ;; esac
+  echo "done: t19-$how: the Bash call saw its conversation id: $got; env file: $(cat "$d"/log/*.envfile 2>/dev/null || echo n/a)"
+}
+
+# T15: the local settings file broken before the session starts (start), or
+# by the session itself between two commands, with a ConfigChange line that
+# records (mid) or blocks (mid-block). Which hooks still fire?
+run_t15() {
+  local when=$1 d="$out/t15-$1"
+  layout "$d"
+  local f="$d/repo/.claude/settings.local.json" cc=ok
+  [ "$when" = mid-block ] && cc=stoploop
+  jq -n --arg probe "$probe" --arg cc "$cc" '{hooks: {
+      UserPromptSubmit: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "UserPromptSubmit", "ok"], timeout: 10}]}],
+      PreToolUse: [{matcher: "Bash", hooks: [{type: "command", command: "/bin/sh", args: [$probe, "PreToolUse", "ok"], timeout: 10}]}],
+      ConfigChange: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "ConfigChange", $cc], timeout: 10, onFailure: "block"}]}]}}' > "$f"
+  local break_it="head -c 100 '$f' > '$f.tmp' && mv '$f.tmp' '$f' && sleep 3" prompt
+  if [ "$when" = start ]; then
+    eval "$break_it"
+    prompt="Run exactly this Bash command, once, and nothing else: \`touch $d/wt/marker-1\` Then, as a second Bash call: \`touch $d/wt/marker-after\` Then reply DONE."
+  else
+    prompt="Run exactly this Bash command, once, and nothing else: \`$break_it\` Then, as a second Bash call: \`touch $d/wt/marker-after\` Then reply DONE."
+  fi
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "$prompt" \
+      --model "$model" --output-format stream-json --verbose --setting-sources local --permission-mode bypassPermissions \
+      --tools Bash --max-turns 4 --max-budget-usd 0.10 ) > "$d/stream.jsonl" 2> "$d/stderr.txt" < /dev/null
+  local n ev; n=""
+  for ev in UserPromptSubmit PreToolUse ConfigChange; do n="$n $ev=$(ls "$d/log" | grep -c "^$ev\.")"; done
+  echo "done: t15-$when: fired$n; marker-after $(yn test -e "$d/wt/marker-after"); $(grep -i -m1 -E 'settings|invalid|json' "$d/stderr.txt" | cut -c1-120)"
+}
+
 # want NAME [PREFIX...]: no prefixes means every case.
 want() {
   local name=$1; shift
@@ -218,3 +271,5 @@ done
 want fork "$@" && run_fork
 want t11 "$@" && run_t11
 want t6 "$@" && { run_t6 ok; run_t6 stoploop; }
+want t19 "$@" && { run_t19 envfile; run_t19 rewrite; }
+want t15 "$@" && { run_t15 start; run_t15 mid; run_t15 mid-block; }

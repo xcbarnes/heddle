@@ -7,6 +7,8 @@
 # touched. For tests only: an installed heddle comes from an attested release.
 #
 # Usage: day0/heddle-e2e.sh HEDDLE_BINARY OUT_DIR   (bash 3.2 compatible)
+# E2E_ONLY="t13 t16" runs only those groups; the default runs every group
+# (core, t13, t16).
 set -u
 bin=${1:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
 out=${2:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
@@ -62,11 +64,12 @@ printf 'id %s\n' "$r1" > "$wt/record-1.txt"
 printf 'id %s\n' "$r2" > "$wt/record-2.txt"
 printf 'id %s\n' "$r3" > "$wt/record-3.txt"
 
-# run NAME SESSION_ID new|resume PROMPT
+# run NAME SESSION_ID new|resume|fork PROMPT
 run() {
   local name=$1 id=$2 mode=$3 prompt=$4
   local which=(--session-id "$id")
   [ "$mode" = resume ] && which=(--resume "$id")
+  [ "$mode" = fork ] && which=(--resume "$id" --fork-session)
   ( cd "$wt" && "${cleanenv[@]}" "$claude_bin" -p "$prompt" "${which[@]}" --model "$model" \
       --output-format stream-json --verbose --include-hook-events --setting-sources "${SOURCES:-local}" --tools Bash \
       --allowedTools "Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)" --max-turns 6 --max-budget-usd 0.25 ) \
@@ -87,7 +90,10 @@ mask() { sed -e "s/$ssn/<fixture>/g" -e "s/$r1/<record>/g" -e "s/$r2/<record>/g"
 seed() { printf 'fabric-conv 1\nphi clean\nsub 0\nstrikes %s\nwithheld 0\n' "$2" > "$quarantine/$1"; }
 marker() { [ -e "$wt/$1" ] && echo "  $(printf '%s' "$1" | mask) CREATED" || echo "  $(printf '%s' "$1" | mask) absent"; }
 
+want() { [ -z "${E2E_ONLY:-}" ] || case " $E2E_ONLY " in *" $1 "*) ;; *) return 1 ;; esac; }
+
 echo "heddle: $("$heddle" version)  claude: $("$claude_bin" --version)"
+if want core; then
 run clean "$(uuid)" new "Run this exact command with the Bash tool, once: touch $wt/marker-clean . Then reply DONE."
 marker marker-clean
 
@@ -149,3 +155,34 @@ settings claude-codex "$state"
 run bad-argument "$(uuid)" new "Run this exact command with the Bash tool, once: touch $wt/marker-badarg . Then reply DONE."
 marker marker-badarg
 settings claude-code "$state"
+fi
+
+# T16: a held prompt carries a random token. After a clean rewrite, a resume
+# and a /compact, can the model quote it? The held text stays on disk.
+if want t16; then
+  tok="TOKEN-$(openssl rand -hex 6)"
+  id=$(uuid)
+  run t16-held "$id" new "Is ssn $ssn on file? My note: $tok. Reply OK."
+  run t16-rewrite "$id" resume "Reply with the word ok."
+  ask="Quote every string in this conversation so far that starts with TOKEN-, exactly, or reply NONE."
+  run t16-ask "$id" resume "$ask"
+  run t16-compact "$id" resume "/compact"
+  run t16-ask-after-compact "$id" resume "$ask"
+  for r in t16-held t16-rewrite t16-ask t16-compact t16-ask-after-compact; do
+    grep -q -- "$tok" "$out/runs/$r.jsonl" && echo "  $r: the held token IS in the stream" || echo "  $r: the held token is absent"
+  done
+fi
+
+# T13, the scriptable half: in -p mode /cd and /branch are "not available",
+# and --fork-session stands in for /branch. A fork of a paused conversation.
+if want t13; then
+  id=$(uuid)
+  run t13-parent "$id" new "Reply with the word one."
+  printf 'fabric-conv 1\nphi exposed inc-t13aaa tool_input 1 0\nsub 0\nstrikes 0\nwithheld 0\n' > "$quarantine/$id"
+  run t13-parent-paused "$id" resume "Run this exact command with the Bash tool, once: touch $wt/marker-t13-parent . Then reply DONE."
+  marker marker-t13-parent
+  run t13-fork "$id" fork "Run this exact command with the Bash tool, once: touch $wt/marker-t13-fork . Then reply DONE."
+  fork_id=$(jq -r 'select(.type=="result") | .session_id' "$out/runs/t13-fork.jsonl" | tail -1)
+  echo "  fork session id differs from the parent's: $([ "$fork_id" != "$id" ] && echo yes || echo no); fork label: $(sed -n 's/^phi //p' "$quarantine/$fork_id" 2>/dev/null || echo none)"
+  marker marker-t13-fork
+fi
