@@ -139,3 +139,11 @@ Three facts about Claude Code 2.1.321 that these runs settle:
 - **PostToolBatch carries the replacement.** After PostToolUse replaced a Bash result, the batch's `tool_response` was the replacement: the batch scan found nothing in it.
 - **PostToolBatch lists denied calls, with their input.** A first-strike denial was turned into a pause by the batch scan reading the denied command, until the batch scan was narrowed to results (PreToolUse already scanned every input, and the model wrote it).
 - **A JSON prompt block without `suppressOriginalPrompt` echoes the prompt** in `-p` mode ("Original prompt: …"). heddle sets it only on a detector hit, so a hiccup leaves the prompt there to copy.
+
+## More Saturday tests, 2026-11-14
+
+| test | result |
+|---|---|
+| **T7**, first part (`day0/cost.py`) | **Passes.** 1,000 runs of each hook line on the recorded payloads: 95th percentile **1.84 ms**, wall clock with process start, against a 30 ms gate. The cost grows about 29 µs per KiB scanned: a 32 KiB Bash result (about Claude Code's own cap on Bash output) takes 2.7 ms, 256 KiB 9.3 ms, 1 MiB 31 ms. The transcript scan, a 60-second lock holder and eight sessions come with the features they measure |
+| **T14**, at session start (`heddle-e2e.sh`, `project-off`) | **Passes.** A project `.claude/settings.json` carrying `"disableAllHooks": true` and an `env` that moves `HOME` did not switch the brake off: the local block's `"disableAllHooks": false` outranks it, and heddle finds its state by `--state`, not `HOME`. **The control proves the line is needed:** without it, the same project file switched every hook off and the blocked action ran (`project-off-control`). The live half (a pull into a running session) needs an interactive session |
+| **T24** (`heddle-e2e.sh`) | **Passes.** Every e2e session runs in a worktree outside the main checkout's folder, and its hits pause it (`tool-input-second`). After `cd /tmp`, Claude Code 2.1.321's Bash tool refused to leave the session's working directory, and the next call's result was withheld as usual (`after-cd`). heddle does not read `cwd` at all |
