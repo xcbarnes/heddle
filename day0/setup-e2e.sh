@@ -76,6 +76,13 @@ h "$wt" "$installed" doctor | grep -i wiring | sed 's/^/  /'
 h "$wt" "$installed" setup > /dev/null; echo "  setup again: exit $?"
 h "$wt" "$installed" doctor | grep -i -E 'wiring|live' | sed 's/^/  /'
 
+echo "== repair: the installed binary is deleted; the kept copy puts it back"
+rm -f "$installed"
+h "$wt" "$fabric/kept/heddle" repair | sed 's/^/  /'
+echo "  installed binary back and runs: $(yn h "$wt" "$installed" version)"
+h "$wt" "$installed" doctor | grep -i -E '^binary|kept' | sed 's/^/  /'
+echo "  repair from anything but the kept copy refuses: $(h "$wt" "$installed" repair 2>&1 | cut -c1-90)"
+
 echo "== uninstall"
 h "$wt" "$installed" uninstall | sed 's/^/  /'
 echo "  binary gone: $(yn test ! -e "$installed"); state gone: $(yn test ! -e "$fabric")"
