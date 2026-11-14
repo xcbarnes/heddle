@@ -8,7 +8,7 @@
 #
 # Usage: day0/heddle-e2e.sh HEDDLE_BINARY OUT_DIR   (bash 3.2 compatible)
 # E2E_ONLY="t13 t16" runs only those groups; the default runs every group
-# (core, replace, t13, t16).
+# (core, replace, pending, scan, rewind, t13, t16).
 set -u
 bin=${1:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
 out=${2:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
@@ -70,12 +70,14 @@ printf 'id %s\n' "$r3" > "$wt/record-3.txt"
 # The tools a session may use; the replace group widens them.
 tools=(--tools Bash)
 allowed=("Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)")
-# run NAME SESSION_ID new|resume|fork PROMPT
+# run NAME SESSION_ID new|resume|fork|at:<message id> PROMPT
+# (at: resumes the conversation at an earlier message: a rewind, in -p mode)
 run() {
   local name=$1 id=$2 mode=$3 prompt=$4
   local which=(--session-id "$id")
   [ "$mode" = resume ] && which=(--resume "$id")
   [ "$mode" = fork ] && which=(--resume "$id" --fork-session)
+  case $mode in at:*) which=(--resume "$id" --resume-session-at "${mode#at:}") ;; esac
   ( cd "$wt" && "${cleanenv[@]}" "$claude_bin" -p "$prompt" "${which[@]}" --model "$model" \
       --output-format stream-json --verbose --include-hook-events --setting-sources "${SOURCES:-local}" "${tools[@]}" \
       --allowedTools "${allowed[@]}" --max-turns 6 --max-budget-usd 0.25 ) \
@@ -174,6 +176,44 @@ if want replace; then
   run mcp-withheld "$(uuid)" new "Call the MCP tool mcp__day0__lookup once. Then reply with exactly what it returned."
   tools=(--tools Bash)
   allowed=("Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)")
+fi
+
+# The pending set: PostToolUse and PostToolBatch are dead (a missing binary),
+# so a record slips into the transcript and the loop stops. The next prompt
+# must be blocked, before the record goes to the model with it.
+if want pending; then
+  settings claude-code "$state"
+  jq '.hooks.PostToolUse[0].hooks[0].command = "/nonexistent/heddle" | .hooks.PostToolBatch[0].hooks[0].command = "/nonexistent/heddle"' \
+    "$repo/.claude/settings.local.json" > "$out/dead.json" && mv "$out/dead.json" "$repo/.claude/settings.local.json"
+  id=$(uuid)
+  run pending-slip "$id" new "Run this exact command with the Bash tool, once: cat $wt/record-2.txt . Then reply with what it printed."
+  settings claude-code "$state"
+  run pending-next "$id" resume "Reply with the word ok."
+fi
+
+# The transcript scan, count-only: the model writes a number in plain text,
+# which no hook gates; the next prompt's scan counts it and blocks nothing.
+if want scan; then
+  rm -f "$state/counts"
+  id=$(uuid)
+  run scan-reply "$id" new "Reply with only this text, with every space removed: 9 8 7 - 1 2 - 3 4 5 6"
+  run scan-next "$id" resume "Reply with the word ok."
+  echo "  counts: $(cut -d' ' -f2- "$state/counts" 2>/dev/null | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+fi
+
+# The rewind proof, with --resume-session-at standing in for /rewind: pause a
+# turn, then resume at the message before it and send again.
+if want rewind; then
+  id=$(uuid)
+  run rewind-one "$id" new "Reply with the word one."
+  tpath=$(ls "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)
+  before=$(grep -o '"uuid":"[0-9a-f-]\{36\}"' "$tpath" | tail -1 | cut -d'"' -f4)
+  seed "$id" 1
+  run rewind-flagged "$id" resume "$input"
+  for n in 1 2; do
+    run "rewind-resend-$n" "$id" "at:$before" "Reply with the word again."
+  done
+  marker "id-$ssn"
 fi
 
 # T16: a held prompt carries a random token. After a clean rewrite, a resume

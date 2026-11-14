@@ -254,7 +254,8 @@ pub fn text(m: &Msg) -> String {
             s,
             "Fabric paused this conversation earlier: something looked like patient information \
              (reference {}). To carry on: start a new session. Or rewind: /rewind, pick the message \
-             before it, choose Restore conversation, then edit and send.",
+             before it, choose Restore conversation, then edit and send. If this comes back right \
+             after a rewind, send it once more.",
             reference(inc)
         ),
         Msg::Sealed => write!(

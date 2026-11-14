@@ -504,7 +504,12 @@ pub fn decide_with(
             && let Some(prompt) = v.get("prompt").and_then(Value::as_str)
             && let Some((start, paused_at)) = machine.rewind_marks(&conv)
             && let Some(bytes) = transcript.and_then(|t| std::fs::read(t).ok())
+            // Rung 1: the resent prompt's own entry is on disk. Rung 2 (seen in
+            // -p mode): a blocked prompt leaves no entry of its own, but its
+            // block notice lands on the rewound branch, so the second send
+            // walks from the newest entry written after the pause.
             && let Some(leaf) = fabric_core::transcript::resent_prompt(&bytes, prompt, paused_at)
+                .or_else(|| fabric_core::transcript::newest_entry(&bytes, paused_at))
             && fabric_core::transcript::chain_clear(&bytes, &leaf, start)
         {
             st.phi = phi::phi_step(st.phi, PhiEvent::ChainProvedClear { incident: flagged }).0;
@@ -1583,6 +1588,64 @@ mod tests {
                     "{d:?}"
                 );
             }
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn the_rewind_proof_works_one_send_later_when_a_blocked_prompt_leaves_only_its_notice() {
+        for rewound in [true, false] {
+            let (m, dir) = machine(if rewound {
+                "notice-rewind"
+            } else {
+                "notice-old"
+            });
+            let log = dir.join("t.jsonl");
+            append(
+                &log,
+                r#"{"type":"user","uuid":"a","parentUuid":null,"message":{"content":"one"}}"#,
+            );
+            append(
+                &log,
+                r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":"ok"}}"#,
+            );
+            let two = at("UserPromptSubmit", &log, r#""prompt":"two""#);
+            assert_eq!(
+                decide(HookKind::UserPromptSubmit, &two, &m, b"inc-aaaaaa"),
+                Decision::Pass
+            );
+            append(
+                &log,
+                r#"{"type":"user","uuid":"c","parentUuid":"b","message":{"content":"two"}}"#,
+            );
+            let hit = at(
+                "PostToolUse",
+                &log,
+                &format!(r#""tool_name":"Glob","tool_response":{{"filenames":["/{SSN}"]}}"#),
+            );
+            assert!(matches!(
+                decide(HookKind::PostToolUse, &hit, &m, b"inc-bbbbbb"),
+                Decision::Halt(Msg::Paused(..))
+            ));
+            append(
+                &log,
+                r#"{"type":"user","uuid":"c2","parentUuid":"c","message":{"content":[{"type":"tool_result","content":"x"}]}}"#,
+            );
+            // The first resend is blocked; it leaves a queue entry and a block notice.
+            let again = at("UserPromptSubmit", &log, r#""prompt":"two, again""#);
+            assert!(matches!(
+                decide(HookKind::UserPromptSubmit, &again, &m, b"inc-cccccc"),
+                Decision::BlockPrompt { .. }
+            ));
+            append(&log, r#"{"type":"queue-operation","operation":"enqueue"}"#);
+            let parent = if rewound { "b" } else { "c2" };
+            append(
+                &log,
+                &format!(r#"{{"type":"system","uuid":"n1","parentUuid":"{parent}"}}"#),
+            );
+            // The second send walks from that notice.
+            let d = decide(HookKind::UserPromptSubmit, &again, &m, b"inc-dddddd");
+            assert_eq!(d == Decision::Pass, rewound, "{d:?}");
             let _ = std::fs::remove_dir_all(dir);
         }
     }
