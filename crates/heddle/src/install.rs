@@ -727,6 +727,81 @@ fn do_uninstall() -> Result<String, String> {
     Ok(done.join("\n"))
 }
 
+// ---- phi recheck ----
+
+/// `heddle phi recheck`: the rewind proof, run now for every paused
+/// conversation, without a prompt (rung 3). It asserts nothing: a label
+/// lowers only when the transcript on disk shows the flagged turn off the
+/// live chain. An agent in another session may run it.
+pub fn phi(args: &[String]) -> ExitCode {
+    if !matches!(args, [a] if a == "recheck") {
+        return fail("usage: heddle phi recheck");
+    }
+    let Ok(p) = Paths::new() else {
+        return fail("HOME is not set to an absolute folder");
+    };
+    let Ok(m) = Machine::open(p.state.clone()) else {
+        println!("Not set up on this computer.");
+        return ExitCode::SUCCESS;
+    };
+    let repos = Receipt::read(&p.receipt).repos();
+    let paused = m.paused();
+    if paused.is_empty() {
+        println!("No paused conversations.");
+    }
+    for (name, transcript) in paused {
+        let Some(conv) = fabric_core::ids::ConvId::parse(name.as_bytes()) else {
+            continue;
+        };
+        // Lower both label copies: the second one lives in the repo it ran in.
+        let second = repos
+            .iter()
+            .map(|(_, main)| main.join(".git/fabric/labels"))
+            .find(|d| d.join(&name).exists());
+        let Ok(m) = Machine::open(p.state.clone()) else {
+            continue;
+        };
+        let m = match second {
+            Some(d) => m.with_second(d),
+            None => m,
+        };
+        let proved = transcript
+            .as_deref()
+            .and_then(|t| fs::read(t).ok())
+            .zip(m.rewind_marks(&conv))
+            .is_some_and(|(bytes, (start, paused_at))| {
+                fabric_core::transcript::newest_entry(&bytes, paused_at)
+                    .is_some_and(|leaf| fabric_core::transcript::chain_clear(&bytes, &leaf, start))
+            });
+        let outcome = match (proved, m.lock()) {
+            (true, Ok(_lock)) => {
+                let fresh = fabric_core::ids::IncidentId::parse(b"inc-recchk");
+                let (mut st, _) = match fresh {
+                    Some(f) => m.read_conv(&conv, f),
+                    None => continue,
+                };
+                if let fabric_core::phi::Phi::Exposed { incident, .. } = st.phi {
+                    st.phi = fabric_core::phi::phi_step(
+                        st.phi,
+                        fabric_core::phi::PhiEvent::ChainProvedClear { incident },
+                    )
+                    .0;
+                }
+                match m.write_conv(&conv, &st) {
+                    Ok(()) if st.phi == fabric_core::phi::Phi::Clean => {
+                        "cleared: the rewind is on disk"
+                    }
+                    Ok(()) | Err(_) => "still paused",
+                }
+            }
+            (true, Err(_)) => "still paused: could not take the lock",
+            (false, _) => "still paused: no rewind past the flagged turn found on disk",
+        };
+        println!("{name}: {outcome}");
+    }
+    ExitCode::SUCCESS
+}
+
 // ---- status ----
 
 /// `heddle status`: the brake's state on this computer. Runs anywhere.

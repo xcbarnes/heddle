@@ -23,6 +23,7 @@ fn main() -> ExitCode {
         Some("repair") => install::repair(),
         Some("uninstall") => install::uninstall(),
         Some("status") => install::status(),
+        Some("phi") => install::phi(args.get(2..).unwrap_or_default()),
         Some("version") => {
             println!("heddle {VERSION}");
             ExitCode::SUCCESS
