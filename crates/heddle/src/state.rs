@@ -118,6 +118,19 @@ pub struct Machine {
     second: Option<PathBuf>,
 }
 
+/// A tool call in the pending set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Pending {
+    /// The call's `tool_use_id`.
+    pub id: String,
+    /// The transcript's length when the call ran.
+    pub offset: u64,
+    /// The prompt id the call ran under.
+    pub prompt: String,
+    /// The transcript the call's result lands in.
+    pub transcript: PathBuf,
+}
+
 /// One copy of a label, as read.
 enum Copy {
     Missing,
@@ -293,6 +306,106 @@ impl Machine {
             .join("quarantine")
             .join(format!("{c}.fork"))
             .exists()
+    }
+
+    fn side(&self, c: &ConvId, ext: &str) -> PathBuf {
+        self.dir.join("quarantine").join(format!("{c}.{ext}"))
+    }
+
+    /// A number kept beside a conversation's label (`turn`, `scanned`).
+    /// Missing or unreadable is `None`. Not safety state: no fsync.
+    pub fn number(&self, c: &ConvId, ext: &str) -> Option<u64> {
+        fs::read_to_string(self.side(c, ext))
+            .ok()?
+            .trim()
+            .parse()
+            .ok()
+    }
+
+    /// Keep a number beside a conversation's label. Best effort.
+    pub fn set_number(&self, c: &ConvId, ext: &str, n: u64) {
+        let _ = fs::write(self.side(c, ext), n.to_string());
+    }
+
+    /// The rewind proof's two offsets for a paused conversation: where the
+    /// flagged turn began, and the transcript's length when it was paused.
+    pub fn rewind_marks(&self, c: &ConvId) -> Option<(u64, u64)> {
+        let text = fs::read_to_string(self.side(c, "rewind")).ok()?;
+        let (start, paused) = text.trim().split_once(' ')?;
+        Some((start.parse().ok()?, paused.parse().ok()?))
+    }
+
+    /// Record the rewind proof's offsets, synced: without them a paused
+    /// conversation can only be left by a new session.
+    pub fn set_rewind_marks(&self, c: &ConvId, flagged_start: u64, paused_at: u64) {
+        if let Ok(mut f) = File::create(self.side(c, "rewind")) {
+            let _ = f.write_all(format!("{flagged_start} {paused_at}\n").as_bytes());
+            let _ = f.sync_all();
+        }
+    }
+
+    /// The pending set: tool calls that ran, each with the transcript it will
+    /// land in, that transcript's length when it ran, and its prompt id.
+    pub fn pending(&self, c: &ConvId) -> Vec<Pending> {
+        let text = fs::read_to_string(self.side(c, "pending")).unwrap_or_default();
+        text.lines()
+            .filter_map(|l| {
+                let mut f = l.splitn(4, '\t');
+                Some(Pending {
+                    id: f.next()?.to_string(),
+                    offset: f.next()?.parse().ok()?,
+                    prompt: f.next()?.to_string(),
+                    transcript: PathBuf::from(f.next()?),
+                })
+            })
+            .collect()
+    }
+
+    /// Add a call to the pending set, synced: it is the net under a hook that
+    /// dies after a tool has run.
+    pub fn pending_add(&self, c: &ConvId, p: &Pending) -> io::Result<()> {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(self.side(c, "pending"))?;
+        f.write_all(
+            format!(
+                "{}\t{}\t{}\t{}\n",
+                p.id,
+                p.offset,
+                p.prompt,
+                p.transcript.display()
+            )
+            .as_bytes(),
+        )?;
+        f.sync_data()
+    }
+
+    /// Keep only the pending calls `keep` accepts.
+    pub fn pending_keep(&self, c: &ConvId, keep: impl Fn(&Pending) -> bool) {
+        let all = self.pending(c);
+        let kept: Vec<&Pending> = all.iter().filter(|p| keep(p)).collect();
+        if kept.len() == all.len() {
+            return;
+        }
+        if kept.is_empty() {
+            let _ = fs::remove_file(self.side(c, "pending"));
+            return;
+        }
+        let text: String = kept
+            .iter()
+            .map(|p| {
+                format!(
+                    "{}\t{}\t{}\t{}\n",
+                    p.id,
+                    p.offset,
+                    p.prompt,
+                    p.transcript.display()
+                )
+            })
+            .collect();
+        let _ = fs::write(self.side(c, "pending"), text);
     }
 
     /// Every conversation whose label pauses it (Exposed or Sealed, or a file

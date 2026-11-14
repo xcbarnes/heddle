@@ -35,7 +35,7 @@ use fabric_core::ids::{ConvId, IncidentId};
 use fabric_core::json::{self, Value};
 use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent, RuleId};
 
-use crate::state::Machine;
+use crate::state::{Machine, Pending};
 use crate::wiring::Wiring;
 
 /// Shorter than the 10-second timeout setup gives every PHI line.
@@ -423,11 +423,134 @@ pub fn decide_with(
         {
             st.phi = phi::phi_step(st.phi, PhiEvent::Flag { incident }).0;
             dirty = true;
-            if let Some(t) = transcript {
-                machine.note_transcript(&conv, t);
-            }
+            note_pause(machine, &conv, transcript);
         }
         machine.mark_fork(&conv, false);
+    }
+    let t_meta = transcript.and_then(|t| std::fs::metadata(t).ok());
+    let t_len = t_meta.as_ref().map_or(0, std::fs::Metadata::len);
+
+    // The pending set (§5). A batch reports its calls back; one that never
+    // does means a hook died after a tool ran.
+    if kind == HookKind::PostToolBatch {
+        let done: Vec<&str> = v
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|calls| {
+                calls
+                    .iter()
+                    .filter_map(|c| c.get("tool_use_id")?.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        machine.pending_keep(&conv, |p| !done.contains(&p.id.as_str()));
+    }
+    // At a prompt or a compaction every pending call is stale; before a tool,
+    // a call from another prompt is. The bytes added since a stale call are
+    // scanned: a hit, or a transcript heddle cannot read, pauses.
+    let prompt_id = v.get("prompt_id").and_then(Value::as_str).unwrap_or("");
+    let stale = |p: &Pending| match kind {
+        HookKind::UserPromptSubmit | HookKind::PreCompact => true,
+        HookKind::PreToolUse => !prompt_id.is_empty() && p.prompt != prompt_id,
+        HookKind::SessionStart
+        | HookKind::UserPromptExpansion
+        | HookKind::PostToolUse
+        | HookKind::PostToolBatch
+        | HookKind::ConfigChange => false,
+    };
+    let stale_calls: Vec<Pending> = machine
+        .pending(&conv)
+        .into_iter()
+        .filter(|p| stale(p))
+        .collect();
+    for p in &stale_calls {
+        // A transcript that was not on disk when the call ran (sessions that
+        // keep none) and still is not cannot hold the result: nothing to scan.
+        // One that appeared since is scanned whole.
+        let absent = p.offset == NO_TRANSCRIPT;
+        if absent && !p.transcript.exists() {
+            continue;
+        }
+        let from = if absent { 0 } else { p.offset };
+        let found = read_from(&p.transcript, from).map(|b| fabric_core::transcript::scan(&b).0);
+        let ev = match found.as_deref() {
+            Some([]) => None,
+            Some([rule, ..]) => Some(PhiEvent::TranscriptHit {
+                rule: *rule,
+                incident,
+            }),
+            None => Some(PhiEvent::Flag { incident }),
+        };
+        if let Some(ev) = ev {
+            let was = matches!(st.phi, Phi::Exposed { .. } | Phi::Sealed { .. });
+            st.phi = phi::phi_step(st.phi, ev).0;
+            dirty = true;
+            if !was {
+                note_pause(machine, &conv, transcript);
+            }
+        }
+    }
+    if !stale_calls.is_empty() {
+        machine.pending_keep(&conv, |p| !stale_calls.contains(p));
+    }
+
+    // At a prompt: the rewind proof first (a paused conversation whose resent
+    // prompt's chain lies wholly before the flagged turn), then where this
+    // turn starts.
+    if kind == HookKind::UserPromptSubmit {
+        if let Phi::Exposed {
+            incident: flagged, ..
+        } = st.phi
+            && let Some(prompt) = v.get("prompt").and_then(Value::as_str)
+            && let Some((start, paused_at)) = machine.rewind_marks(&conv)
+            && let Some(bytes) = transcript.and_then(|t| std::fs::read(t).ok())
+            && let Some(leaf) = fabric_core::transcript::resent_prompt(&bytes, prompt, paused_at)
+            && fabric_core::transcript::chain_clear(&bytes, &leaf, start)
+        {
+            st.phi = phi::phi_step(st.phi, PhiEvent::ChainProvedClear { incident: flagged }).0;
+            dirty = true;
+        }
+        machine.set_number(&conv, "turn", t_len);
+    }
+
+    // The transcript scan, count-only (§5): the bytes added since the last
+    // scan, before each model call, and any @file a prompt names. It logs;
+    // it never decides.
+    if matches!(kind, HookKind::UserPromptSubmit | HookKind::PostToolBatch)
+        && let Some(t) = transcript
+    {
+        match machine.number(&conv, "scanned") {
+            Some(from) if from <= t_len => {
+                let read = read_from(Path::new(t), from);
+                let (rules, used) = read
+                    .as_deref()
+                    .map_or((Vec::new(), 0), fabric_core::transcript::scan);
+                for r in rules {
+                    machine.count("scan", kind, r);
+                }
+                if read.is_none() {
+                    machine.count("scan", kind, RuleId::R07);
+                }
+                let next = if read.is_none() {
+                    t_len
+                } else {
+                    from.saturating_add(u64::try_from(used).unwrap_or(0))
+                };
+                machine.set_number(&conv, "scanned", next);
+            }
+            // First sight, or a transcript that was rewritten: start here.
+            Some(_) | None => machine.set_number(&conv, "scanned", t_len),
+        }
+    }
+    if kind == HookKind::UserPromptSubmit {
+        let cwd = v.get("cwd").and_then(Value::as_str).map(Path::new);
+        for file in at_files(v.get("prompt").and_then(Value::as_str).unwrap_or(""), cwd) {
+            let bytes = read_from(&file, 0).unwrap_or_default();
+            let found = detect::detect(&bytes);
+            for h in found.hits.iter().flatten() {
+                machine.count("scan", kind, h.rule);
+            }
+        }
     }
 
     // Check 1: the effective label, in every folder, before anything else.
@@ -472,11 +595,8 @@ pub fn decide_with(
                 Some(out) => {
                     if let Some(ev) = out.event {
                         st.phi = phi::phi_step(st.phi, ev).0;
-                        if let Some(t) = transcript {
-                            machine.note_transcript(&conv, t);
-                            if let Some(id) = last_message_id(t) {
-                                machine.note_flagged(&conv, &id);
-                            }
+                        if matches!(st.phi, Phi::Exposed { .. }) {
+                            note_pause(machine, &conv, transcript);
                         }
                     }
                     if out.strike {
@@ -501,7 +621,79 @@ pub fn decide_with(
     if dirty {
         machine.write_conv(&conv, &st).map_err(|_| Fault)?;
     }
+    // This call will run: it joins the pending set until its batch reports.
+    if kind == HookKind::PreToolUse
+        && let (Some(id), Some(t)) = (v.get("tool_use_id").and_then(Value::as_str), transcript)
+    {
+        let p = Pending {
+            id: id.to_string(),
+            offset: if t_meta.is_some() {
+                t_len
+            } else {
+                NO_TRANSCRIPT
+            },
+            prompt: prompt_id.to_string(),
+            transcript: PathBuf::from(t),
+        };
+        machine.pending_add(&conv, &p).map_err(|_| Fault)?;
+    }
     Ok(hook::turn_gate(kind, st.withheld).unwrap_or(Decision::Pass))
+}
+
+/// A pending call's offset when its transcript was not on disk yet.
+const NO_TRANSCRIPT: u64 = u64::MAX;
+
+/// When a conversation is paused: note its transcript (for `status` and
+/// `uninstall`), its newest message id (for fork matching), and the rewind
+/// proof's offsets: where the flagged turn began and how long the transcript
+/// was. Best effort, apart from the offsets, which are synced.
+fn note_pause(machine: &Machine, conv: &ConvId, transcript: Option<&str>) {
+    let Some(t) = transcript else {
+        return;
+    };
+    machine.note_transcript(conv, t);
+    if let Some(id) = last_message_id(t) {
+        machine.note_flagged(conv, &id);
+    }
+    let len = std::fs::metadata(t).map_or(0, |m| m.len());
+    let start = machine
+        .number(conv, "turn")
+        .filter(|s| *s <= len)
+        .unwrap_or(0);
+    machine.set_rewind_marks(conv, start, len);
+}
+
+/// Up to 16 MiB of a file from `from` on. `None` if it cannot be read, is
+/// shorter than `from`, or holds more than that.
+fn read_from(path: &Path, from: u64) -> Option<Vec<u8>> {
+    use std::io::Seek;
+    const MAX: u64 = 16 * 1024 * 1024;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len < from || len.saturating_sub(from) > MAX {
+        return None;
+    }
+    f.seek(std::io::SeekFrom::Start(from)).ok()?;
+    let mut out = Vec::new();
+    f.read_to_end(&mut out).ok()?;
+    Some(out)
+}
+
+/// The files a prompt names with `@`: Claude Code adds them without a tool
+/// call. Paths are taken relative to the session's folder.
+fn at_files(prompt: &str, cwd: Option<&Path>) -> Vec<PathBuf> {
+    prompt
+        .split_whitespace()
+        .filter_map(|w| w.strip_prefix('@'))
+        .map(|w| w.trim_end_matches([',', '.', ';', ':', ')', '!', '?']))
+        .filter(|w| !w.is_empty())
+        .map(|w| match cwd {
+            Some(c) if !w.starts_with('/') => c.join(w),
+            Some(_) | None => PathBuf::from(w),
+        })
+        .filter(|p| p.is_file())
+        .take(16)
+        .collect()
 }
 
 /// `{"hookSpecificOutput": {"hookEventName": <event>, ...rest}}` plus `top`.
@@ -1128,6 +1320,271 @@ mod tests {
         assert_eq!(block.get("type").and_then(Value::as_str), Some("text"));
         let bash = out(ResultShape::Bash);
         assert_eq!(bash.get("isImage").and_then(Value::as_bool), Some(false));
+    }
+
+    /// A payload for `event` whose transcript is `log`, plus `extra` members.
+    fn at(event: &str, log: &Path, extra: &str) -> Vec<u8> {
+        format!(
+            r#"{{"session_id":"{CONV}","transcript_path":"{}","cwd":"{}","hook_event_name":"{event}","prompt_id":"p1"{}{extra}}}"#,
+            log.display(),
+            log.parent().expect("dir").display(),
+            if extra.is_empty() { "" } else { "," }
+        )
+        .into_bytes()
+    }
+
+    fn append(log: &Path, line: &str) {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log)
+            .expect("open");
+        writeln!(f, "{line}").expect("write");
+    }
+
+    #[test]
+    fn the_pending_set_catches_a_result_that_slipped_past_a_dead_batch_hook() {
+        let (m, dir) = machine("pending");
+        let log = dir.join("t.jsonl");
+        append(
+            &log,
+            r#"{"type":"user","uuid":"a","parentUuid":null,"message":{"content":"hi"}}"#,
+        );
+        let conv = ConvId::parse(CONV.as_bytes()).expect("conv");
+        let call = |id: &str| {
+            at(
+                "PreToolUse",
+                &log,
+                &format!(
+                    r#""tool_name":"Bash","tool_use_id":"{id}","tool_input":{{"command":"ls"}}"#
+                ),
+            )
+        };
+        // A call that ran and was reported back leaves nothing behind.
+        assert_eq!(
+            decide(HookKind::PreToolUse, &call("t1"), &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        assert_eq!(m.pending(&conv).len(), 1);
+        let batch = at(
+            "PostToolBatch",
+            &log,
+            r#""tool_calls":[{"tool_use_id":"t1","tool_response":"fine"}]"#,
+        );
+        assert_eq!(
+            decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        assert!(m.pending(&conv).is_empty());
+        // A clean stale call is only dropped.
+        assert_eq!(
+            decide(HookKind::PreToolUse, &call("t2"), &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        append(
+            &log,
+            r#"{"type":"user","uuid":"b","message":{"content":[{"type":"tool_result","content":"fine"}]}}"#,
+        );
+        let prompt = at("UserPromptSubmit", &log, r#""prompt":"next""#);
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &prompt, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        assert!(m.pending(&conv).is_empty());
+        // A result that landed while the batch hook was dead pauses at the next prompt.
+        assert_eq!(
+            decide(HookKind::PreToolUse, &call("t3"), &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        append(
+            &log,
+            &format!(
+                r#"{{"type":"user","uuid":"c","message":{{"content":[{{"type":"tool_result","content":"id {SSN}"}}]}}}}"#
+            ),
+        );
+        let d = decide(HookKind::UserPromptSubmit, &prompt, &m, b"inc-cccccc");
+        assert_eq!(
+            d,
+            Decision::BlockPrompt {
+                msg: Msg::StillPaused(inc(b"inc-cccccc")),
+                suppress: false
+            }
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        // A transcript that cannot be read is not proof of anything: it pauses too.
+        let (m, dir) = machine("pending-gone");
+        let log = dir.join("t.jsonl");
+        append(&log, r#"{"type":"user","uuid":"a"}"#);
+        let call = at(
+            "PreToolUse",
+            &log,
+            r#""tool_name":"Bash","tool_use_id":"t9","tool_input":{"command":"ls"}"#,
+        );
+        assert_eq!(
+            decide(HookKind::PreToolUse, &call, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        std::fs::remove_file(&log).expect("rm");
+        // A call under another prompt: the earlier one is stale.
+        let other_prompt = String::from_utf8(at(
+            "PreToolUse",
+            &log,
+            r#""tool_name":"Bash","tool_use_id":"t10","tool_input":{"command":"ls"}"#,
+        ))
+        .expect("utf8")
+        .replace(r#""prompt_id":"p1""#, r#""prompt_id":"p2""#);
+        let d = decide(
+            HookKind::PreToolUse,
+            other_prompt.as_bytes(),
+            &m,
+            b"inc-dddddd",
+        );
+        assert_eq!(
+            d,
+            Decision::DenyAndStop(Msg::StillPaused(inc(b"inc-dddddd")))
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_session_that_keeps_no_transcript_is_not_paused_by_the_pending_set() {
+        let (m, dir) = machine("no-transcript");
+        let never = dir.join("never.jsonl");
+        let call = at(
+            "PreToolUse",
+            &never,
+            r#""tool_name":"Bash","tool_use_id":"t1","tool_input":{"command":"ls"}"#,
+        );
+        assert_eq!(
+            decide(HookKind::PreToolUse, &call, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        let prompt = at("UserPromptSubmit", &never, r#""prompt":"next""#);
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &prompt, &m, b"inc-bbbbbb"),
+            Decision::Pass
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_transcript_scan_and_at_files_only_count() {
+        let (m, dir) = machine("scan");
+        let log = dir.join("t.jsonl");
+        append(
+            &log,
+            r#"{"type":"user","uuid":"a","message":{"content":"hi"}}"#,
+        );
+        let prompt = at("UserPromptSubmit", &log, r#""prompt":"hi""#);
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &prompt, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        // Text the hooks never saw lands in the transcript: it is counted, not braked.
+        append(
+            &log,
+            &format!(
+                r#"{{"type":"assistant","uuid":"b","message":{{"content":[{{"type":"text","text":"id {SSN}"}}]}}}}"#
+            ),
+        );
+        let batch = at("PostToolBatch", &log, r#""tool_calls":[]"#);
+        assert_eq!(
+            decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        // A file named with @ is read and counted too.
+        std::fs::write(dir.join("record.txt"), format!("id {SSN}\n")).expect("write");
+        let with_file = at(
+            "UserPromptSubmit",
+            &log,
+            r#""prompt":"look at @record.txt please""#,
+        );
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &with_file, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        let log_lines = std::fs::read_to_string(dir.join("counts")).expect("counts");
+        let seen: Vec<Vec<&str>> = log_lines
+            .lines()
+            .map(|l| l.split(' ').skip(1).collect())
+            .collect();
+        assert_eq!(
+            seen,
+            [
+                ["scan", "PostToolBatch", "R-09"],
+                ["scan", "UserPromptSubmit", "R-09"]
+            ]
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_rewind_proof_lowers_a_pause_only_for_a_resent_prompt_off_the_flagged_turn() {
+        for rewound in [true, false] {
+            let (m, dir) = machine(if rewound { "rewind" } else { "no-rewind" });
+            let log = dir.join("t.jsonl");
+            append(
+                &log,
+                r#"{"type":"user","uuid":"a","parentUuid":null,"message":{"content":"one"}}"#,
+            );
+            append(
+                &log,
+                r#"{"type":"assistant","uuid":"b","parentUuid":"a","message":{"content":"ok"}}"#,
+            );
+            // The flagged turn: its prompt passes, then a result heddle cannot replace hits.
+            let two = at("UserPromptSubmit", &log, r#""prompt":"two""#);
+            assert_eq!(
+                decide(HookKind::UserPromptSubmit, &two, &m, b"inc-aaaaaa"),
+                Decision::Pass
+            );
+            append(
+                &log,
+                r#"{"type":"user","uuid":"c","parentUuid":"b","message":{"content":"two"}}"#,
+            );
+            let hit = at(
+                "PostToolUse",
+                &log,
+                &format!(r#""tool_name":"Glob","tool_response":{{"filenames":["/{SSN}"]}}"#),
+            );
+            assert!(matches!(
+                decide(HookKind::PostToolUse, &hit, &m, b"inc-bbbbbb"),
+                Decision::Halt(Msg::Paused(..))
+            ));
+            append(
+                &log,
+                r#"{"type":"user","uuid":"c2","parentUuid":"c","message":{"content":[{"type":"tool_result","content":"hidden"}]}}"#,
+            );
+            // The person resends: after a rewind its parent is b, before the flagged turn.
+            let parent = if rewound { "b" } else { "c2" };
+            append(
+                &log,
+                &format!(
+                    r#"{{"type":"user","uuid":"d","parentUuid":"{parent}","message":{{"content":"two, again"}}}}"#
+                ),
+            );
+            let again = at("UserPromptSubmit", &log, r#""prompt":"two, again""#);
+            let d = decide(HookKind::UserPromptSubmit, &again, &m, b"inc-cccccc");
+            if rewound {
+                assert_eq!(
+                    d,
+                    Decision::Pass,
+                    "the proof holds: the conversation goes on"
+                );
+            } else {
+                assert!(
+                    matches!(
+                        d,
+                        Decision::BlockPrompt {
+                            msg: Msg::StillPaused(_),
+                            ..
+                        }
+                    ),
+                    "{d:?}"
+                );
+            }
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 
     #[test]
