@@ -187,14 +187,44 @@ pub enum Decision {
     Deny(Msg),
     /// PreToolUse: deny and stop processing (`continue: false`): the brake.
     DenyAndStop(Msg),
-    /// PostToolUse: replace the Bash result with the sentence; the turn goes on.
-    ReplaceBash(Msg),
+    /// PostToolUse: replace the result with the sentence, in the tool's own
+    /// shape; the turn goes on.
+    Replace(Msg, ResultShape),
     /// PostToolBatch: stop the loop before the next model call.
     StopLoop(Msg),
     /// Any event: `continue: false`, Claude Code's universal stop.
     Halt(Msg),
     /// ConfigChange: refuse the change for the running session (hook line 9).
     BlockConfig(Msg),
+}
+
+/// A tool result heddle can replace, by its output shape. A built-in tool's
+/// replacement must match its output schema, or Claude Code ignores it and
+/// sends the original (PostToolBatch's scan then stops the loop); an MCP
+/// tool's output is not validated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ResultShape {
+    /// `{stdout, stderr, interrupted, isImage}`.
+    Bash,
+    /// `{type: "text", file: {filePath, content, numLines, startLine, totalLines}}`.
+    Read,
+    /// `{mode, numFiles, filenames, content, numLines}`.
+    Grep,
+    /// A content-block array, `[{type: "text", text}]`.
+    Mcp,
+}
+
+impl ResultShape {
+    /// The shape of this tool's result, if heddle can replace it.
+    pub fn of(tool: &str) -> Option<ResultShape> {
+        match tool {
+            "Bash" => Some(ResultShape::Bash),
+            "Read" => Some(ResultShape::Read),
+            "Grep" => Some(ResultShape::Grep),
+            t if t.starts_with("mcp__") => Some(ResultShape::Mcp),
+            _ => None,
+        }
+    }
 }
 
 /// The fixed table. Plain words; facts, not orders.
@@ -366,8 +396,8 @@ pub struct ScanCtx {
     /// UserPromptSubmit: a person typed the prompt (no subagent hook since
     /// the last prompt: the conservative rule of M13).
     pub person_typed: bool,
-    /// PostToolUse: this tool's result has a known shape to replace.
-    pub can_replace: bool,
+    /// PostToolUse: the shape to replace this tool's result with, if any.
+    pub result_shape: Option<ResultShape>,
     /// PostToolUse: the result passed a model before the hook (web fetch, a subagent).
     pub passed_model: bool,
     /// Patient-shaped tool inputs already denied in this conversation.
@@ -434,22 +464,24 @@ pub fn on_hit(
             Decision::DenyAndStop(Msg::Paused(rule, incident)),
             PhiEvent::ToolInputHit { rule, incident },
         )),
-        HookKind::PostToolUse if ctx.can_replace && !ctx.passed_model => Some(HitOutcome {
-            decision: Decision::ReplaceBash(Msg::Withheld(rule)),
-            event: None,
-            strike: false,
-            withheld: true,
-        }),
-        HookKind::PostToolUse => Some(pause(
-            Decision::Halt(Msg::Paused(rule, incident)),
-            PhiEvent::ResultHit {
-                rule,
-                can_replace: false,
-                can_stop: true,
-                passed_model: ctx.passed_model,
-                incident,
-            },
-        )),
+        HookKind::PostToolUse => match ctx.result_shape {
+            Some(shape) if !ctx.passed_model => Some(HitOutcome {
+                decision: Decision::Replace(Msg::Withheld(rule), shape),
+                event: None,
+                strike: false,
+                withheld: true,
+            }),
+            Some(_) | None => Some(pause(
+                Decision::Halt(Msg::Paused(rule, incident)),
+                PhiEvent::ResultHit {
+                    rule,
+                    can_replace: false,
+                    can_stop: true,
+                    passed_model: ctx.passed_model,
+                    incident,
+                },
+            )),
+        },
         HookKind::PostToolBatch => Some(pause(
             Decision::StopLoop(Msg::Paused(rule, incident)),
             PhiEvent::BatchHit { rule, incident },
@@ -492,7 +524,7 @@ mod tests {
     fn ctx() -> ScanCtx {
         ScanCtx {
             person_typed: true,
-            can_replace: true,
+            result_shape: Some(ResultShape::Read),
             passed_model: false,
             input_strikes: 0,
         }
@@ -567,7 +599,7 @@ mod tests {
         let one = on_hit(HookKind::PostToolUse, RuleId::R01, &ctx(), inc()).expect("a hit");
         assert_eq!(
             one.decision,
-            Decision::ReplaceBash(Msg::Withheld(RuleId::R01))
+            Decision::Replace(Msg::Withheld(RuleId::R01), ResultShape::Read)
         );
         assert!(one.withheld && one.event.is_none());
         assert_eq!(turn_gate(HookKind::PostToolBatch, 2), None);
@@ -581,7 +613,7 @@ mod tests {
             HookKind::PostToolUse,
             RuleId::R01,
             &ScanCtx {
-                can_replace: false,
+                result_shape: None,
                 ..ctx()
             },
             inc(),

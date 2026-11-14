@@ -30,7 +30,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use fabric_core::detect;
-use fabric_core::hook::{self, Decision, HookKind, Msg, ScanCtx};
+use fabric_core::hook::{self, Decision, HookKind, Msg, ResultShape, ScanCtx};
 use fabric_core::ids::{ConvId, IncidentId};
 use fabric_core::json::{self, Value};
 use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent, RuleId};
@@ -62,16 +62,16 @@ pub fn run(args: &[String]) -> ExitCode {
         _ => None,
     };
     let Some(kind) = kind else {
-        return emit(Decision::Halt(Msg::Hiccup));
+        return emit(Decision::Halt(Msg::Hiccup), "");
     };
     let outcome = match parse_line(args.get(2..).unwrap_or_default()) {
         Some(line) if armed => std::panic::catch_unwind(|| decide(kind, &line))
-            .unwrap_or_else(|_| Some(line.fault(kind))),
-        Some(line) => Some(line.fault(kind)),
-        None => Some(hook::fault(kind)),
+            .unwrap_or_else(|_| Some((line.fault(kind), String::new()))),
+        Some(line) => Some((line.fault(kind), String::new())),
+        None => Some((hook::fault(kind), String::new())),
     };
     match outcome {
-        Some(decision) => emit(decision),
+        Some((decision, file_path)) => emit(decision, &file_path),
         // The live check's canary: fail on purpose, print nothing.
         None => ExitCode::from(STOPPED),
     }
@@ -147,22 +147,24 @@ fn arm_watchdog() -> bool {
         .is_ok()
 }
 
-/// The decision for this run; `None` only for the live check's canary.
-fn decide(kind: HookKind, line: &Line) -> Option<Decision> {
+/// The decision for this run, with the Read call's file path for a
+/// replacement; `None` only for the live check's canary.
+fn decide(kind: HookKind, line: &Line) -> Option<(Decision, String)> {
+    let plain = |d: Decision| Some((d, String::new()));
     let Ok(machine) = Machine::open(line.state.clone()) else {
-        return Some(line.fault(kind));
+        return plain(line.fault(kind));
     };
     let machine = machine.with_second(line.root.join(".git/fabric/labels"));
     let payload = read_payload(kind);
     if line.count_only {
         count_hits(kind, payload.ok().as_deref(), &machine);
-        return Some(Decision::Pass);
+        return plain(Decision::Pass);
     }
     let (Ok(payload), Some(inc)) = (payload, fresh_incident()) else {
-        return Some(hook::fault(kind));
+        return plain(hook::fault(kind));
     };
     if kind == HookKind::ConfigChange {
-        return Some(config_change(&payload, line).unwrap_or_else(|Fault| hook::fault(kind)));
+        return plain(config_change(&payload, line).unwrap_or_else(|Fault| hook::fault(kind)));
     }
     if kind == HookKind::PreToolUse && json::from_slice(&payload).is_ok_and(|v| is_canary(&v)) {
         let now = std::time::SystemTime::now()
@@ -171,7 +173,21 @@ fn decide(kind: HookKind, line: &Line) -> Option<Decision> {
         let _ = std::fs::write(line.state.join("canary"), now.to_string());
         return None;
     }
-    Some(decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind)))
+    let d = decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind));
+    let file_path = if matches!(d, Decision::Replace(_, ResultShape::Read)) {
+        json::from_slice(&payload)
+            .ok()
+            .and_then(|v| {
+                v.get("tool_input")?
+                    .get("file_path")?
+                    .as_str()
+                    .map(String::from)
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    Some((d, file_path))
 }
 
 /// The newest message id in a transcript, from its last 256 KiB.
@@ -441,7 +457,11 @@ pub fn decide_with(
     // The pre-filter on this hook's text.
     let ctx = ScanCtx {
         person_typed,
-        can_replace: kind == HookKind::PostToolUse && tool == "Bash",
+        result_shape: if kind == HookKind::PostToolUse {
+            ResultShape::of(tool)
+        } else {
+            None
+        },
         passed_model: matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent"),
         input_strikes: st.strikes,
     };
@@ -505,8 +525,47 @@ fn stop(m: &Msg) -> Vec<(String, Value)> {
     ]
 }
 
-/// The harness's JSON for a decision; `None` for a pass.
-pub fn render(d: Decision) -> Option<Value> {
+/// The withheld sentence in the replaced tool's own output shape, matching
+/// the recorded PostToolUse payloads (`adapters/claude-code/payloads/`).
+fn replacement(shape: ResultShape, text: &str, file_path: &str) -> Value {
+    let n = |x: &str| Value::Number(x.to_string());
+    match shape {
+        ResultShape::Bash => Value::object([
+            ("stdout", Value::str(text)),
+            ("stderr", Value::str("")),
+            ("interrupted", Value::Bool(false)),
+            ("isImage", Value::Bool(false)),
+        ]),
+        ResultShape::Read => Value::object([
+            ("type", Value::str("text")),
+            (
+                "file",
+                Value::object([
+                    ("filePath", Value::str(file_path)),
+                    ("content", Value::str(text)),
+                    ("numLines", n("1")),
+                    ("startLine", n("1")),
+                    ("totalLines", n("1")),
+                ]),
+            ),
+        ]),
+        ResultShape::Grep => Value::object([
+            ("mode", Value::str("content")),
+            ("numFiles", n("0")),
+            ("filenames", Value::Array(Vec::new())),
+            ("content", Value::str(text)),
+            ("numLines", n("1")),
+        ]),
+        ResultShape::Mcp => Value::Array(vec![Value::object([
+            ("type", Value::str("text")),
+            ("text", Value::str(text)),
+        ])]),
+    }
+}
+
+/// The harness's JSON for a decision; `None` for a pass. `file_path` is the
+/// Read call's, for its replacement.
+pub fn render(d: Decision, file_path: &str) -> Option<Value> {
     let block = |m: &Msg| {
         vec![
             ("decision".to_string(), Value::str("block")),
@@ -548,16 +607,11 @@ pub fn render(d: Decision) -> Option<Value> {
         | Decision::BlockConfig(m) => Value::Object(block(&m)),
         Decision::Deny(m) => deny(&m, vec![]),
         Decision::DenyAndStop(m) => deny(&m, stop(&m)),
-        Decision::ReplaceBash(m) => specific(
+        Decision::Replace(m, shape) => specific(
             HookKind::PostToolUse,
             [(
                 "updatedToolOutput",
-                Value::object([
-                    ("stdout", Value::str(&hook::text(&m))),
-                    ("stderr", Value::str("")),
-                    ("interrupted", Value::Bool(false)),
-                    ("isImage", Value::Bool(false)),
-                ]),
+                replacement(shape, &hook::text(&m), file_path),
             )],
             vec![],
         ),
@@ -568,8 +622,8 @@ pub fn render(d: Decision) -> Option<Value> {
 
 /// Print the decision in one write. A stop that cannot be printed exits
 /// non-zero, so the harness still blocks.
-fn emit(d: Decision) -> ExitCode {
-    let Some(v) = render(d) else {
+fn emit(d: Decision, file_path: &str) -> ExitCode {
+    let Some(v) = render(d, file_path) else {
         return ExitCode::SUCCESS;
     };
     let mut out = std::io::stdout().lock();
@@ -721,7 +775,7 @@ mod tests {
         for n in 1..=3 {
             let d = decide(HookKind::PostToolUse, &hit, &m, b"inc-aaaaaa");
             assert!(
-                matches!(d, Decision::ReplaceBash(Msg::Withheld(_))),
+                matches!(d, Decision::Replace(Msg::Withheld(_), ResultShape::Bash)),
                 "{n}: {d:?}"
             );
             let d = decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa");
@@ -745,13 +799,13 @@ mod tests {
     }
 
     #[test]
-    fn a_read_result_or_a_hit_in_the_batch_pauses_the_conversation() {
-        let (m, dir) = machine("read");
-        let read = payload(
+    fn a_result_a_model_already_read_or_a_hit_in_the_batch_pauses_the_conversation() {
+        let (m, dir) = machine("web");
+        let web = payload(
             "PostToolUse",
-            &format!(r#""tool_name":"Read","tool_response":{{"file":{{"content":"ssn {SSN}"}}}}"#),
+            &format!(r#""tool_name":"WebFetch","tool_response":{{"result":"ssn {SSN}"}}"#),
         );
-        let d = decide(HookKind::PostToolUse, &read, &m, b"inc-aaaaaa");
+        let d = decide(HookKind::PostToolUse, &web, &m, b"inc-aaaaaa");
         assert!(matches!(d, Decision::Halt(Msg::Paused(..))), "{d:?}");
         let _ = std::fs::remove_dir_all(dir);
         let (m, dir) = machine("batch");
@@ -986,6 +1040,97 @@ mod tests {
     }
 
     #[test]
+    fn read_grep_and_mcp_results_are_withheld_in_their_own_shape() {
+        let (m, dir) = machine("shapes");
+        let cases = [
+            (
+                "Read",
+                format!(
+                    r#"{{"type":"text","file":{{"filePath":"/r.txt","content":"ssn {SSN}","numLines":1,"startLine":1,"totalLines":1}}}}"#
+                ),
+                ResultShape::Read,
+            ),
+            (
+                "Grep",
+                format!(
+                    r#"{{"mode":"content","numFiles":0,"filenames":[],"content":"r.txt:1:ssn {SSN}","numLines":1}}"#
+                ),
+                ResultShape::Grep,
+            ),
+            (
+                "mcp__db__lookup",
+                format!(r#"[{{"type":"text","text":"ssn {SSN}"}}]"#),
+                ResultShape::Mcp,
+            ),
+        ];
+        let batch = payload("PostToolBatch", r#""tool_calls":[]"#);
+        for (n, (tool, response, shape)) in cases.into_iter().enumerate() {
+            let p = payload(
+                "PostToolUse",
+                &format!(
+                    r#""tool_name":"{tool}","tool_input":{{"file_path":"/r.txt"}},"tool_response":{response}"#
+                ),
+            );
+            let d = decide(HookKind::PostToolUse, &p, &m, b"inc-aaaaaa");
+            assert!(
+                matches!(d, Decision::Replace(Msg::Withheld(_), s) if s == shape),
+                "{tool}: {d:?}"
+            );
+            // They count toward the three-in-a-turn stop with Bash's.
+            let stop = decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa");
+            assert_eq!(
+                stop == Decision::StopLoop(Msg::TurnStopped),
+                n == 2,
+                "{tool}"
+            );
+        }
+        // A result heddle cannot replace still pauses.
+        let glob = payload(
+            "PostToolUse",
+            &format!(r#""tool_name":"Glob","tool_response":{{"filenames":["/{SSN}"]}}"#),
+        );
+        assert!(matches!(
+            decide(HookKind::PostToolUse, &glob, &m, b"inc-bbbbbb"),
+            Decision::Halt(Msg::Paused(..))
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn each_replacement_has_its_tools_output_shape() {
+        let out = |shape| {
+            render(Decision::Replace(Msg::Hiccup, shape), "/r.txt")
+                .and_then(|v| {
+                    v.get("hookSpecificOutput")
+                        .and_then(|o| o.get("updatedToolOutput"))
+                        .cloned()
+                })
+                .expect("a replacement")
+        };
+        let read = out(ResultShape::Read);
+        assert_eq!(read.get("type").and_then(Value::as_str), Some("text"));
+        let file = read.get("file").expect("file");
+        assert_eq!(file.get("filePath").and_then(Value::as_str), Some("/r.txt"));
+        assert_eq!(
+            file.get("content").and_then(Value::as_str),
+            Some(hook::text(&Msg::Hiccup).as_str())
+        );
+        let grep = out(ResultShape::Grep);
+        assert_eq!(grep.get("mode").and_then(Value::as_str), Some("content"));
+        assert_eq!(
+            grep.get("filenames")
+                .and_then(Value::as_array)
+                .map(<[Value]>::len),
+            Some(0)
+        );
+        let mcp = out(ResultShape::Mcp);
+        let block = mcp.as_array().and_then(|a| a.first()).expect("one block");
+        assert_eq!(block.get("type").and_then(Value::as_str), Some("text"));
+        let bash = out(ResultShape::Bash);
+        assert_eq!(bash.get("isImage").and_then(Value::as_bool), Some(false));
+    }
+
+    #[test]
     fn h1e_bad_input_is_a_fault() {
         let (m, dir) = machine("faults");
         let i = inc(b"inc-aaaaaa");
@@ -1098,9 +1243,9 @@ mod tests {
     #[test]
     fn the_rendered_json_has_the_shapes_claude_code_reads() {
         let i = inc(b"inc-aaaaaa");
-        let r = |d| json::to_string(&render(d).expect("json"));
-        assert_eq!(render(Decision::Pass), None);
-        let deny = render(Decision::Deny(Msg::Hiccup)).expect("json");
+        let r = |d| json::to_string(&render(d, "").expect("json"));
+        assert_eq!(render(Decision::Pass, ""), None);
+        let deny = render(Decision::Deny(Msg::Hiccup), "").expect("json");
         let inner = deny.get("hookSpecificOutput").expect("inner");
         assert_eq!(
             inner.get("permissionDecision").and_then(Value::as_str),
@@ -1111,7 +1256,7 @@ mod tests {
             Some("PreToolUse")
         );
         assert_eq!(deny.get("continue"), None);
-        let stop = render(Decision::DenyAndStop(Msg::StillPaused(i))).expect("json");
+        let stop = render(Decision::DenyAndStop(Msg::StillPaused(i)), "").expect("json");
         assert_eq!(stop.get("continue").and_then(Value::as_bool), Some(false));
         assert!(
             r(Decision::BlockPrompt {
@@ -1127,7 +1272,7 @@ mod tests {
         assert!(
             fault.starts_with(r#"{"decision":"block","reason":"#) && !fault.contains("suppress")
         );
-        let replace = render(Decision::ReplaceBash(Msg::Hiccup)).expect("json");
+        let replace = render(Decision::Replace(Msg::Hiccup, ResultShape::Bash), "").expect("json");
         let out = replace
             .get("hookSpecificOutput")
             .and_then(|o| o.get("updatedToolOutput"))

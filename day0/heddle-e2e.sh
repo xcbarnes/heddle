@@ -8,10 +8,11 @@
 #
 # Usage: day0/heddle-e2e.sh HEDDLE_BINARY OUT_DIR   (bash 3.2 compatible)
 # E2E_ONLY="t13 t16" runs only those groups; the default runs every group
-# (core, t13, t16).
+# (core, replace, t13, t16).
 set -u
 bin=${1:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
 out=${2:?usage: heddle-e2e.sh HEDDLE_BINARY OUT_DIR}
+here=$(cd "$(dirname "$0")" && pwd)
 claude_bin=${CLAUDE_BIN:-$HOME/.local/bin/claude}
 model=${PROBE_MODEL:-haiku}
 rm -rf "$out"
@@ -66,6 +67,9 @@ printf 'id %s\n' "$r1" > "$wt/record-1.txt"
 printf 'id %s\n' "$r2" > "$wt/record-2.txt"
 printf 'id %s\n' "$r3" > "$wt/record-3.txt"
 
+# The tools a session may use; the replace group widens them.
+tools=(--tools Bash)
+allowed=("Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)")
 # run NAME SESSION_ID new|resume|fork PROMPT
 run() {
   local name=$1 id=$2 mode=$3 prompt=$4
@@ -73,8 +77,8 @@ run() {
   [ "$mode" = resume ] && which=(--resume "$id")
   [ "$mode" = fork ] && which=(--resume "$id" --fork-session)
   ( cd "$wt" && "${cleanenv[@]}" "$claude_bin" -p "$prompt" "${which[@]}" --model "$model" \
-      --output-format stream-json --verbose --include-hook-events --setting-sources "${SOURCES:-local}" --tools Bash \
-      --allowedTools "Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)" --max-turns 6 --max-budget-usd 0.25 ) \
+      --output-format stream-json --verbose --include-hook-events --setting-sources "${SOURCES:-local}" "${tools[@]}" \
+      --allowedTools "${allowed[@]}" --max-turns 6 --max-budget-usd 0.25 ) \
     > "$out/runs/$name.jsonl" 2> "$out/runs/$name.err" < /dev/null
   local label; label=$(sed 1d "$quarantine/$id" 2>/dev/null | tr '\n' ' ')
   local reply; reply=$(jq -r 'select(.type=="result") | .result // empty' "$out/runs/$name.jsonl" | tr '\n' ' ' | mask | cut -c1-160)
@@ -156,6 +160,20 @@ settings claude-codex "$state"
 run bad-argument "$(uuid)" new "Run this exact command with the Bash tool, once: touch $wt/marker-badarg . Then reply DONE."
 marker marker-badarg
 settings claude-code "$state"
+fi
+
+# Read, Grep and MCP results are withheld in their own shapes. If Claude Code
+# ignored a replacement, the original would reach the batch, whose scan
+# would pause the conversation: a clean label proves the shape held.
+if want replace; then
+  mcp=$(jq -n --arg srv "$here/mcp-echo.py" --arg f "$wt/record-3.txt" '{mcpServers: {day0: {command: "/usr/bin/python3", args: ["-I", $srv, $f]}}}')
+  tools=(--tools "Read,Grep" --mcp-config "$mcp" --strict-mcp-config)
+  allowed=("Read" "Grep" "mcp__day0__lookup")
+  run read-withheld "$(uuid)" new "Use the Read tool on $wt/record-1.txt, once. Then reply with exactly what it showed."
+  run grep-withheld "$(uuid)" new "Use the Grep tool once to search the folder $wt for the word id, output mode content. Then reply with exactly what it found."
+  run mcp-withheld "$(uuid)" new "Call the MCP tool mcp__day0__lookup once. Then reply with exactly what it returned."
+  tools=(--tools Bash)
+  allowed=("Bash(touch *)" "Bash(echo *)" "Bash(cat *)" "Bash(cd *)")
 fi
 
 # T16: a held prompt carries a random token. After a clean rewrite, a resume
