@@ -156,3 +156,17 @@ Three facts about Claude Code 2.1.321 that these runs settle:
 | **T16** (`heddle-e2e.sh`, `t16`) | **A held prompt does not come back.** A typed prompt carrying a fixture and a random token was held. After a clean rewrite, a resume and a `/compact`, the model answered NONE when asked for any `TOKEN-` string, and the token is in no stream. In `-p` mode Held needs no chain proof. Interactive mode is still to check (T21) |
 | **T19** (`run.sh t19`) | **A Bash call can learn its conversation, both ways.** A SessionStart hook that appends `export FABRIC_SEAT=<session id>` to `$CLAUDE_ENV_FILE` reaches later Bash calls, and so does a PreToolUse `updatedInput` that prefixes the command. Outside bypass mode Claude Code refuses an unallowed command that *expands* a variable ("can't be checked before it runs"). So the verbs read the id from their environment and never name it in the command. Seats per conversation work |
 | **T24** (`heddle-e2e.sh`) | **Passes.** Every e2e session runs in a worktree outside the main checkout's folder, and its hits pause it (`tool-input-second`). After `cd /tmp`, Claude Code 2.1.321's Bash tool refused to leave the session's working directory, and the next call's result was withheld as usual (`after-cd`). heddle does not read `cwd` at all |
+
+## setup, end to end (`setup-e2e.sh`), 2026-11-14
+
+`heddle setup` run from a linked worktree, with HOME pointed at a scratch folder so nothing real is installed, then real `claude -p` sessions on 2.1.321 in bypass mode.
+
+| step | what happened |
+|---|---|
+| setup | Passed the dry scan, proved the binary starts, installed it and a kept copy, wrote 8 hook lines into the main checkout's `.claude/settings.local.json`, and git ignores that file. Receipt and `REPAIR.txt` written |
+| doctor, before the live check | "Live check: not run yet", exit 1 |
+| **the live check** | An agent ran `heddle doctor --canary`. heddle's PreToolUse hook recognised it and failed on purpose; **Claude Code refused the call** ("a PreToolUse hook failed … onFailure"), so the canary never ran. doctor then reported "Claude called heddle, and a deliberately broken check was blocked", exit 0 |
+| **hook line 9** | A script (deny rules do not cover scripts) stripped the PreToolUse line from the settings file mid-session. ConfigChange ran, heddle refused the change and left its trace, and **the next command was still hooked** (PreToolUse 2 of 2). `stream-json` does not report ConfigChange hook events, so the trace file is the evidence |
+| doctor, after the strip | "Wiring: BROKEN (a hook line is missing or changed)": the file on disk did change; only running sessions were protected. `setup` again restored it |
+| uninstall | Took Fabric's entries out of the settings file (it was empty before setup, and is `{}` after), removed both binaries and the state folder |
+

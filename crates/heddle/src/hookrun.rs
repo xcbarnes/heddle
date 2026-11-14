@@ -211,10 +211,16 @@ fn config_change(raw: &[u8], line: &Line) -> Result<Decision, Fault> {
     let now = std::fs::read(&ours)
         .ok()
         .and_then(|b| json::from_slice(&b).ok());
-    Ok(match now.map(|s| wiring.lines_intact(&s)) {
-        Some(Ok(())) => Decision::Pass,
-        Some(Err(_)) | None => Decision::BlockConfig(Msg::WiringKept),
-    })
+    if now.is_some_and(|s| wiring.lines_intact(&s).is_ok()) {
+        return Ok(Decision::Pass);
+    }
+    // Leave a trace for `doctor`: the person may wonder why a change to the
+    // file did not apply to sessions already open. Best effort.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let _ = std::fs::write(line.state.join("config-refused"), secs.to_string());
+    Ok(Decision::BlockConfig(Msg::WiringKept))
 }
 
 /// Count mode: log each rule that fires, once per run, or R-00 when the

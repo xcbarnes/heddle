@@ -593,6 +593,13 @@ fn report() -> ExitCode {
         (None, _) => lines
             .push("This folder is not in a git repository; only the machine checks ran.".into()),
     }
+    if p.state.join("config-refused").exists() {
+        lines.push(
+            "Hook line 9 has refused a settings change that would have removed Fabric's checks from \
+             sessions already open; the file on disk changed, and new sessions read it."
+                .into(),
+        );
+    }
     let paused = Machine::open(p.state.clone())
         .map(|m| m.paused().len())
         .unwrap_or(0);
