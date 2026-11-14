@@ -16,6 +16,7 @@ pub mod config;
 pub mod detect;
 pub mod hook;
 pub mod ids;
+pub mod json;
 pub mod link;
 pub mod phi;
 pub mod restrict;
