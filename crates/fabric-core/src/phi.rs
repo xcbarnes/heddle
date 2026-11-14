@@ -230,6 +230,13 @@ pub enum PhiEvent {
     },
     /// A verified snapshot shows this seat Sealed.
     RoomSaysSealed,
+    /// The rewind proof: heddle re-read the conversation, and every entry
+    /// behind the resent prompt was written before the flagged turn began.
+    /// Lowers that incident's label to Clean; nothing else moves.
+    ChainProvedClear {
+        /// The incident the proof is for.
+        incident: IncidentId,
+    },
     /// A verified snapshot shows this incident, or an exit record for it.
     TaintAcked {
         /// The incident the room shows.
@@ -459,6 +466,10 @@ pub fn phi_step(p: Phi, ev: PhiEvent) -> (Phi, PhiEffects) {
                 (p, NONE)
             }
         }
+        PhiEvent::ChainProvedClear { incident: proved } => match p {
+            Phi::Exposed { incident, .. } if incident == proved => (Phi::Clean, NONE),
+            Phi::Clean | Phi::Held | Phi::Exposed { .. } | Phi::Sealed { .. } => (p, NONE),
+        },
         PhiEvent::RoomSaysSealed => (
             Phi::Sealed {
                 reason: SealReason::Confirmed,
@@ -839,6 +850,8 @@ mod tests {
                 cause: Cause::FoundLater
             },
             PhiEvent::RoomSaysSealed,
+            PhiEvent::ChainProvedClear { incident: a },
+            PhiEvent::ChainProvedClear { incident: i },
             PhiEvent::TaintAcked { incident: a },
             PhiEvent::TaintAcked { incident: i },
         ];
@@ -930,6 +943,11 @@ mod tests {
                                 ..
                             },
                         ) => incident == seen && hits <= upto && q == Phi::Clean,
+                        // The rewind proof, for exactly this incident.
+                        (
+                            Phi::Exposed { incident, .. },
+                            PhiEvent::ChainProvedClear { incident: proved },
+                        ) => incident == proved && q == Phi::Clean,
                         _ => false,
                     };
                     assert!(ok, "a label lowered: {p:?} --{ev:?}--> {q:?}");

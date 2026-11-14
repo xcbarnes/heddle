@@ -23,3 +23,4 @@ pub mod restrict;
 pub mod seat;
 pub mod snap;
 pub mod time;
+pub mod transcript;
