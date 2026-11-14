@@ -7,7 +7,6 @@
 use std::process::ExitCode;
 
 mod hookrun;
-mod setup;
 mod state;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -19,7 +18,6 @@ fn main() -> ExitCode {
             args.get(2).map(String::as_str),
             args.get(3).map(String::as_str),
         ),
-        Some("setup") => setup::run(&args),
         Some("version") => {
             println!("heddle {VERSION}");
             ExitCode::SUCCESS

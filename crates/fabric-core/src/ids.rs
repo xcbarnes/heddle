@@ -32,7 +32,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 /// Exactly `2 * N` lowercase hex characters.
-pub(crate) fn from_hex<const N: usize>(s: &[u8]) -> Option<[u8; N]> {
+fn from_hex<const N: usize>(s: &[u8]) -> Option<[u8; N]> {
     let mut out = [0u8; N];
     let mut it = s.iter();
     for slot in out.iter_mut() {
