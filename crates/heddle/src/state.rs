@@ -177,10 +177,14 @@ impl Machine {
         File::open(&dir)?.sync_all()
     }
 
-    /// Count a hit that does not block, by rule id, for tuning. Never the text,
-    /// never the conversation. Best effort: counting is not a safety property.
-    pub fn count(&self, kind: HookKind, rule: RuleId) {
-        let line = format!("{} {}\n", kind.name(), rule_name(rule));
+    /// Log a hit that decided nothing, for tuning and for count mode: one
+    /// line of Unix seconds, mode, event and rule id. Never the text, never
+    /// the conversation. Best effort: counting is not a safety property.
+    pub fn count(&self, mode: &str, kind: HookKind, rule: RuleId) {
+        let secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let line = format!("{secs} {mode} {} {}\n", kind.name(), rule_name(rule));
         if let Ok(mut f) = OpenOptions::new()
             .create(true)
             .append(true)

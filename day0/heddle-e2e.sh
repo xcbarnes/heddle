@@ -26,13 +26,16 @@ git -C "$repo" -c user.name=day0 -c user.email=day0@invalid commit -q --allow-em
 git -C "$repo" worktree add -q "$wt" 2>/dev/null
 mkdir -p "$repo/.claude"
 
-# settings HARNESS STATE [no-dah]: the local block as setup writes it, with
-# "disableAllHooks": false unless the third argument leaves it out.
+# settings HARNESS STATE [no-dah|count]: the local block as setup writes it.
+# no-dah leaves out "disableAllHooks": false; count writes count-mode lines
+# (decision 4): --mode count, and no onFailure.
 settings() {
-  jq -n --arg h "$heddle" --arg harness "$1" --arg root "$repo" --arg state "$2" --arg dah "${3:-}" '
+  jq -n --arg h "$heddle" --arg harness "$1" --arg root "$repo" --arg state "$2" --arg variant "${3:-}" '
     def line($ev; $block):
-      {type: "command", command: $h, args: ["hook", $harness, $ev, "--root", $root, "--state", $state], timeout: 10}
-      + (if $block then {onFailure: "block"} else {} end);
+      {type: "command", command: $h, timeout: 10,
+       args: (["hook", $harness, $ev, "--root", $root, "--state", $state]
+              + (if $variant == "count" then ["--mode", "count"] else [] end))}
+      + (if $block and $variant != "count" then {onFailure: "block"} else {} end);
     {hooks: {
       SessionStart:     [{hooks: [line("SessionStart"; false)]}],
       UserPromptSubmit: [{hooks: [line("UserPromptSubmit"; true)]}],
@@ -40,7 +43,7 @@ settings() {
       PostToolUse:      [{matcher: "*", hooks: [line("PostToolUse"; true)]}],
       PostToolBatch:    [{hooks: [line("PostToolBatch"; true)]}],
       PreCompact:       [{hooks: [line("PreCompact"; true)]}]
-    }} + (if $dah == "no-dah" then {} else {disableAllHooks: false} end)' > "$repo/.claude/settings.local.json"
+    }} + (if $variant == "no-dah" then {} else {disableAllHooks: false} end)' > "$repo/.claude/settings.local.json"
 }
 settings claude-code "$state"
 
@@ -127,6 +130,15 @@ for c in project-off project-off-control; do
   marker "marker-$c"
 done
 rm -f "$repo/.claude/settings.json" "$wt/.claude/settings.json"
+settings claude-code "$state"
+
+# Decision 4: count mode logs the hit and decides nothing.
+settings claude-code "$state" count
+rm -f "$state/counts"
+run count-only "$(uuid)" new "$input"
+marker "id-$ssn"
+echo "  counts: $(cut -d' ' -f2- "$state/counts" 2>/dev/null | sort | uniq -c | tr -s ' ' | tr '\n' ';')"
+rm -f "$wt/id-$ssn"
 settings claude-code "$state"
 
 settings claude-code "$out/no-such-folder"

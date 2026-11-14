@@ -1,9 +1,14 @@
-//! `heddle hook claude-code <Event> --root <main checkout> --state <folder>`:
-//! the PHI checks of every hook line.
+//! `heddle hook claude-code <Event> --root <main checkout> --state <folder>
+//! [--mode brake|count]`: the PHI checks of every hook line.
 //!
 //! The hook line's presence is the enrolment: every invocation enforces, and
 //! the two absolute arguments are the only way heddle finds its state (no
 //! environment variable, so a pulled `env` block cannot point it elsewhere).
+//!
+//! `--mode count` (decision 4; Eureka until PHI readiness) logs every hit by
+//! rule in the state folder and decides nothing: it prints nothing, even on a
+//! fault, and its lines carry no `onFailure: "block"`. Without `--mode`, a
+//! line is the full brake, so a line that loses the flag fails closed.
 //!
 //! The order of the first three things is the safety argument:
 //! 1. the watchdog is armed before any read (decision new-15): a heddle that
@@ -28,7 +33,7 @@ use fabric_core::detect;
 use fabric_core::hook::{self, Decision, HookKind, Msg, ScanCtx};
 use fabric_core::ids::{ConvId, IncidentId};
 use fabric_core::json::{self, Value};
-use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent};
+use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent, RuleId};
 
 use crate::state::Machine;
 
@@ -58,36 +63,69 @@ pub fn run(args: &[String]) -> ExitCode {
     let Some(kind) = kind else {
         return emit(Decision::Halt(Msg::Hiccup));
     };
-    let decision = match state_arg(args.get(2..).unwrap_or_default()) {
-        Some(state) if armed => {
-            std::panic::catch_unwind(|| decide(kind, &state)).unwrap_or_else(|_| hook::fault(kind))
+    let decision = match parse_line(args.get(2..).unwrap_or_default()) {
+        Some(line) if armed => {
+            std::panic::catch_unwind(|| decide(kind, &line)).unwrap_or_else(|_| line.fault(kind))
         }
-        Some(_) | None => hook::fault(kind),
+        Some(line) => line.fault(kind),
+        None => hook::fault(kind),
     };
     emit(decision)
 }
 
-/// `--root <abs> --state <abs>`, each exactly once, both absolute. Returns the
-/// state folder. The root is required now so the wiring is final; the room
-/// and the second label copy read it.
-fn state_arg(rest: &[String]) -> Option<PathBuf> {
+/// What the hook line says after the event.
+#[derive(Debug, PartialEq, Eq)]
+struct Line {
+    /// The state folder.
+    state: PathBuf,
+    /// `--mode count`: log every hit, decide nothing.
+    count_only: bool,
+}
+
+impl Line {
+    /// What a fault prints: the fault decision, or nothing in count mode.
+    fn fault(&self, kind: HookKind) -> Decision {
+        if self.count_only {
+            Decision::Pass
+        } else {
+            hook::fault(kind)
+        }
+    }
+}
+
+/// `--root <abs> --state <abs> [--mode brake|count]`, each at most once, in
+/// any order; the two paths required and absolute. The root is required now
+/// so the wiring is final; the room and the second label copy read it.
+fn parse_line(rest: &[String]) -> Option<Line> {
     let (pairs, odd) = rest.as_chunks::<2>();
     if !odd.is_empty() {
         return None;
     }
-    let (mut root, mut state) = (None, None);
+    let (mut root, mut state, mut mode) = (None, None, None);
     for [flag, value] in pairs {
         let slot = match flag.as_str() {
             "--root" => &mut root,
             "--state" => &mut state,
+            "--mode" => &mut mode,
             _ => return None,
         };
-        if slot.replace(Path::new(value)).is_some() || !Path::new(value).is_absolute() {
+        if slot.replace(value.as_str()).is_some() {
             return None;
         }
     }
-    root?;
-    state.map(Path::to_path_buf)
+    let count_only = match mode {
+        None | Some("brake") => false,
+        Some("count") => true,
+        Some(_) => return None,
+    };
+    fn absolute(p: Option<&str>) -> Option<&Path> {
+        p.map(Path::new).filter(|p| p.is_absolute())
+    }
+    absolute(root)?;
+    Some(Line {
+        state: absolute(state)?.to_path_buf(),
+        count_only,
+    })
 }
 
 /// The watchdog. If it cannot be armed, the hook fails closed.
@@ -103,17 +141,41 @@ fn arm_watchdog() -> bool {
         .is_ok()
 }
 
-fn decide(kind: HookKind, state: &Path) -> Decision {
-    let Ok(payload) = read_payload(kind) else {
-        return hook::fault(kind);
+fn decide(kind: HookKind, line: &Line) -> Decision {
+    let Ok(machine) = Machine::open(line.state.clone()) else {
+        return line.fault(kind);
     };
-    let Ok(machine) = Machine::open(state.to_path_buf()) else {
-        return hook::fault(kind);
-    };
-    let Some(inc) = fresh_incident() else {
+    let payload = read_payload(kind);
+    if line.count_only {
+        count_hits(kind, payload.ok().as_deref(), &machine);
+        return Decision::Pass;
+    }
+    let (Ok(payload), Some(inc)) = (payload, fresh_incident()) else {
         return hook::fault(kind);
     };
     decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind))
+}
+
+/// Count mode: log each rule that fires, once per run, or R-00 when the
+/// payload could not be read, and decide nothing. No label is read or written.
+fn count_hits(kind: HookKind, raw: Option<&[u8]>, machine: &Machine) {
+    let parsed =
+        raw.and_then(|r| json::from_slice(r.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(r)).ok());
+    let Some(v) = parsed else {
+        machine.count("count", kind, RuleId::R00);
+        return;
+    };
+    if let Some(text) = scan_text(kind, &v) {
+        // Each rule once per hook run: the JSON text and the raw strings
+        // often show the same value twice.
+        let mut seen: Vec<RuleId> = Vec::new();
+        for h in detect::detect(&text).hits.iter().flatten() {
+            if !seen.contains(&h.rule) {
+                seen.push(h.rule);
+                machine.count("count", kind, h.rule);
+            }
+        }
+    }
 }
 
 /// Read the payload, capped. A payload over the cap is a fault.
@@ -275,7 +337,7 @@ pub fn decide_with(
                     machine.write_conv(&conv, &st).map_err(|_| Fault)?;
                     return Ok(out.decision);
                 }
-                None => machine.count(kind, h.rule),
+                None => machine.count("brake", kind, h.rule),
             }
         }
     }
@@ -612,15 +674,25 @@ mod tests {
     }
 
     #[test]
-    fn the_arguments_are_both_flags_once_and_absolute() {
-        let a = |s: &[&str]| state_arg(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+    fn the_arguments_are_both_paths_once_and_absolute_and_an_optional_mode() {
+        let a = |s: &[&str]| parse_line(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        let brake = Some(Line {
+            state: PathBuf::from("/s"),
+            count_only: false,
+        });
+        assert_eq!(a(&["--root", "/r", "--state", "/s"]), brake);
+        assert_eq!(a(&["--state", "/s", "--root", "/r"]), brake);
         assert_eq!(
-            a(&["--root", "/r", "--state", "/s"]),
-            Some(PathBuf::from("/s"))
+            a(&["--root", "/r", "--state", "/s", "--mode", "brake"]),
+            brake
         );
+        let count = Some(Line {
+            state: PathBuf::from("/s"),
+            count_only: true,
+        });
         assert_eq!(
-            a(&["--state", "/s", "--root", "/r"]),
-            Some(PathBuf::from("/s"))
+            a(&["--mode", "count", "--root", "/r", "--state", "/s"]),
+            count
         );
         for bad in [
             &["--state", "/s"][..],
@@ -630,10 +702,53 @@ mod tests {
             &["--root", "/r", "--state", "/s", "--state", "/t"],
             &["--root", "/r", "--state"],
             &["--root", "/r", "--other", "/s"],
+            &["--root", "/r", "--state", "/s", "--mode", "off"],
+            &[
+                "--root", "/r", "--state", "/s", "--mode", "count", "--mode", "count",
+            ],
             &[],
         ] {
             assert_eq!(a(bad), None, "{bad:?}");
         }
+    }
+
+    #[test]
+    fn decision_4_count_mode_logs_hits_and_never_touches_a_label() {
+        let (m, dir) = machine("count");
+        count_hits(
+            HookKind::PreToolUse,
+            Some(&bash("PreToolUse", &format!("echo id {SSN}"))),
+            &m,
+        );
+        count_hits(HookKind::PreToolUse, Some(&bash("PreToolUse", "ls")), &m);
+        count_hits(HookKind::PostToolUse, Some(b"not json"), &m);
+        count_hits(HookKind::PostToolUse, None, &m);
+        let log = std::fs::read_to_string(dir.join("counts")).expect("a counts file");
+        let lines: Vec<Vec<&str>> = log
+            .lines()
+            .map(|l| l.split(' ').skip(1).collect())
+            .collect();
+        assert_eq!(
+            lines,
+            [
+                ["count", "PreToolUse", "R-09"],
+                ["count", "PostToolUse", "R-00"],
+                ["count", "PostToolUse", "R-00"]
+            ]
+        );
+        assert!(log.lines().all(|l| {
+            l.split(' ')
+                .next()
+                .is_some_and(|t| t.parse::<u64>().is_ok())
+        }));
+        let conv = ConvId::parse(CONV.as_bytes()).expect("conv");
+        assert!(!m.conv_path(&conv).exists(), "no label in count mode");
+        let line = Line {
+            state: dir.clone(),
+            count_only: true,
+        };
+        assert_eq!(line.fault(HookKind::PreToolUse), Decision::Pass);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
