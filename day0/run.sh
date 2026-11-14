@@ -1,7 +1,10 @@
 #!/bin/bash
 # Day-0 hook tests. Drives real `claude -p` sessions against probe.sh, one
 # scratch repo per case, and records what Claude Code does with each hook
-# outcome. Evidence is physical, never the model's say-so:
+# outcome. The layout is the shipped wiring (test T1): the hook lines sit in
+# the main checkout's .claude/settings.local.json, and every session runs in a
+# linked worktree with --setting-sources local. Evidence is physical, never
+# the model's say-so:
 #   - PreToolUse and UserPromptSubmit cases ask for `touch marker`: did the file appear?
 #   - PostToolUse and PostToolBatch cases ask for `cat secret.txt`, a random token
 #     the model can only learn from the tool result: did it reach the reply,
@@ -60,7 +63,7 @@ batch-missing     PostToolBatch    missing   block 10 cat
 combo-post-kill9  PostToolUse+PostToolBatch kill9+stoploop block 10 cat
 "
 
-# settings.json for one hook line, or several joined by "+" (EVENT and MODE in step).
+# The settings for one hook line, or several joined by "+" (EVENT and MODE in step).
 hook_json() {
   case $1 in
     *+*) local evs=$1 modes=$2 acc='{"hooks":{}}' e m
@@ -82,30 +85,40 @@ hook_json() {
 
 yn() { if "$@"; then echo yes; else echo no; fi; }
 
+# layout DIR: a main checkout DIR/repo with one commit and an empty
+# .claude/, its linked worktree DIR/wt, and DIR/log for the probe.
+layout() {
+  rm -rf "$1"; mkdir -p "$1/log"
+  git init -q "$1/repo"
+  git -C "$1/repo" -c user.name=day0 -c user.email=day0@invalid commit -q --allow-empty -m init
+  git -C "$1/repo" worktree add -q "$1/wt" 2>/dev/null
+  mkdir -p "$1/repo/.claude"
+}
+
 run_case() {
   local name=$1 ev=$2 mode=$3 onfail=$4 to=$5 kind=$6
   local d="$out/$name"
-  rm -rf "$d"; mkdir -p "$d/repo/.claude" "$d/log"
-  git -C "$d/repo" init -q
-  hook_json "$ev" "$mode" "$onfail" "$to" > "$d/repo/.claude/settings.json"
+  layout "$d"
+  hook_json "$ev" "$mode" "$onfail" "$to" > "$d/repo/.claude/settings.local.json"
+  local w="$d/wt"
   local token; token="TOKEN-$(openssl rand -hex 8)"
-  printf '%s\n' "$token" > "$d/repo/secret.txt"
+  printf '%s\n' "$token" > "$w/secret.txt"
   local prompt
   if [ "$kind" = touch ]; then
-    prompt="Run this exact command with the Bash tool, once: touch $d/repo/marker . If the call is blocked or denied, do not retry and do not try another way. Then reply with one word: DONE or BLOCKED."
+    prompt="Run this exact command with the Bash tool, once: touch $w/marker . If the call is blocked or denied, do not retry and do not try another way. Then reply with one word: DONE or BLOCKED."
   else
-    prompt="Run this exact command with the Bash tool, once: cat $d/repo/secret.txt . Then reply with exactly the text it printed and nothing else. If you saw no output, reply NONE."
+    prompt="Run this exact command with the Bash tool, once: cat $w/secret.txt . Then reply with exactly the text it printed and nothing else. If you saw no output, reply NONE."
   fi
   local t0=$SECONDS
-  ( cd "$d/repo" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "$prompt" \
+  ( cd "$w" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "$prompt" \
       --model "$model" --output-format stream-json --verbose --include-hook-events \
-      --setting-sources project --tools Bash --max-turns 4 --max-budget-usd 0.25 \
+      --setting-sources local --tools Bash --max-turns 4 --max-budget-usd 0.25 \
       --allowedTools "Bash(touch *)" "Bash(cat *)" ) \
     > "$d/stream.jsonl" 2> "$d/stderr.txt" < /dev/null
   local rc=$? secs=$((SECONDS - t0))
   local fired; fired=$(find "$d/log" -name '*.json' | wc -l | tr -d ' ')
   local tpath; tpath=$(cat "$d"/log/*.json 2>/dev/null | jq -r '.transcript_path? // empty' 2>/dev/null | head -1)
-  local marker; marker=$(yn test -e "$d/repo/marker")
+  local marker; marker=$(yn test -e "$w/marker")
   local in_reply in_result in_transcript
   in_reply=$(yn grep -q "$token" <(jq -r 'select(.type=="result") | .result? // empty' "$d/stream.jsonl" 2>/dev/null))
   in_result=$(yn grep -q "$token" <(jq -c 'select(.type=="user") | .message.content[]? | select(.type=="tool_result")' "$d/stream.jsonl" 2>/dev/null))
@@ -128,17 +141,16 @@ run_case() {
 # SessionStart payloads for startup, resume and fork (decision C19, M12 rows).
 run_fork() {
   local d="$out/fork"
-  rm -rf "$d"; mkdir -p "$d/repo/.claude" "$d/log"
-  git -C "$d/repo" init -q
+  layout "$d"
   jq -n --arg probe "$probe" '{hooks: {
       SessionStart: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "SessionStart", "ok"], timeout: 10}]}],
       UserPromptSubmit: [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, "UserPromptSubmit", "ok"], timeout: 10}]}]}}' \
-    > "$d/repo/.claude/settings.json"
+    > "$d/repo/.claude/settings.local.json"
   local id; id=$(uuidgen | tr 'A-Z' 'a-z')
-  local common=(--model "$model" --output-format stream-json --verbose --setting-sources project --tools "" --max-turns 1 --max-budget-usd 0.10)
-  ( cd "$d/repo" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word one." --session-id "$id" "${common[@]}" ) > "$d/1.jsonl" 2>&1 < /dev/null
-  ( cd "$d/repo" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word two." --resume "$id" "${common[@]}" ) > "$d/2.jsonl" 2>&1 < /dev/null
-  ( cd "$d/repo" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word three." --resume "$id" --fork-session "${common[@]}" ) > "$d/3.jsonl" 2>&1 < /dev/null
+  local common=(--model "$model" --output-format stream-json --verbose --setting-sources local --tools "" --max-turns 1 --max-budget-usd 0.10)
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word one." --session-id "$id" "${common[@]}" ) > "$d/1.jsonl" 2>&1 < /dev/null
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word two." --resume "$id" "${common[@]}" ) > "$d/2.jsonl" 2>&1 < /dev/null
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word three." --resume "$id" --fork-session "${common[@]}" ) > "$d/3.jsonl" 2>&1 < /dev/null
   echo "$id" > "$d/first_session_id"
   echo "done: fork (payloads in $d/log)"
 }

@@ -110,3 +110,32 @@ It uses the subscription login of the terminal `claude` and costs a few cents of
 | bad-argument | a hook line with an unknown harness argument stopped the session under R-00 | none |
 
 Not covered yet: forks (T3 needs the root-uuid match), subagents' prompts, the transcript scan, and the room.
+
+## T1: the shipped wiring, 2026-11-14
+
+`run.sh` now lays each case out as setup will: the hook lines sit in the **main checkout's** `.claude/settings.local.json`, and every session runs in a **linked worktree** of it with `--setting-sources local`. Claude Code 2.1.321.
+
+**All 36 cases reproduce the table above, and the fork run records `startup`, `resume` and `fork` again.** Each hook fired once (twice for the combination case; never for the five missing-binary cases), and every payload's `cwd` is the worktree. So one local settings file serves every worktree of a repo, and nothing is committed.
+
+## heddle end to end on the ported hook, 2026-11-14
+
+`heddle-e2e.sh` now wires a local test build of heddle the same way (`--root <main checkout> --state <scratch folder>`, sessions in a linked worktree), so nothing outside the output folder is touched. The hook reads JSON with fabric-core's own reader; heddle has no third-party crates. Decision 3 applies: withheld results let the conversation go on, and the first patient-shaped tool input gets a hint.
+
+| case | what happened | label file afterwards |
+|---|---|---|
+| clean | `touch` ran; heddle printed nothing | none |
+| prompt-held | a typed prompt with an SSN was held before sending (R-01) | `held` |
+| result-withheld | `cat` of a scratch file holding a random number in the unissued 987 area: the Bash result was replaced with the withheld sentence (R-09), the model answered from the sentence, and **the number is nowhere in the stream** | `clean`, withheld 1 |
+| three-withheld | three such `cat` calls in one turn: each result replaced, and PostToolBatch stopped the turn after the third | `clean`, withheld 3 |
+| tool-input-hint | the model wrote the number into a `touch` command: denied with the made-up-data hint, **no file created**, the conversation went on | `clean`, strikes 1 |
+| tool-input-second | the same with one strike already recorded: denied and stopped (`continue: false`), no file created | `exposed … tool_input` |
+| brake-persists | that conversation resumed: the next prompt was blocked with the pause sentence and its reference | unchanged |
+| unreadable-label | a label file in an unknown format was read as paused (V5); the first prompt was blocked | `exposed … found_later` |
+| missing-state | `--state` names a folder that does not exist: the first prompt was blocked with the hiccup sentence (R-00); no label could be written | none |
+| bad-argument | an unknown harness argument stopped the session (R-00) | none |
+
+Three facts about Claude Code 2.1.321 that these runs settle:
+
+- **PostToolBatch carries the replacement.** After PostToolUse replaced a Bash result, the batch's `tool_response` was the replacement: the batch scan found nothing in it.
+- **PostToolBatch lists denied calls, with their input.** A first-strike denial was turned into a pause by the batch scan reading the denied command, until the batch scan was narrowed to results (PreToolUse already scanned every input, and the model wrote it).
+- **A JSON prompt block without `suppressOriginalPrompt` echoes the prompt** in `-p` mode ("Original prompt: …"). heddle sets it only on a detector hit, so a hiccup leaves the prompt there to copy.

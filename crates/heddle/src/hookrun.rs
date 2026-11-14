@@ -152,16 +152,35 @@ fn fresh_incident() -> Option<IncidentId> {
 /// (so record keys such as `"first_name":` show), then each string raw (so
 /// line-based formats such as HL7 show).
 fn scan_text(kind: HookKind, v: &Value) -> Option<Vec<u8>> {
+    let results;
     let target = match kind {
-        HookKind::UserPromptSubmit => v.get("prompt"),
-        HookKind::PreToolUse => v.get("tool_input"),
-        HookKind::PostToolUse => v.get("tool_response"),
-        HookKind::PostToolBatch => v.get("tool_calls"),
+        HookKind::UserPromptSubmit => v.get("prompt")?,
+        HookKind::PreToolUse => v.get("tool_input")?,
+        HookKind::PostToolUse => v.get("tool_response")?,
+        // The results only. PreToolUse scanned every input, and the model
+        // wrote them; a denied input here would turn its first strike into a
+        // pause. A batch of an unknown shape is scanned whole.
+        HookKind::PostToolBatch => {
+            let calls = v.get("tool_calls")?;
+            results = calls.as_array().map_or_else(
+                || calls.clone(),
+                |calls| {
+                    Value::Array(
+                        calls
+                            .iter()
+                            .filter_map(|c| c.get("tool_response"))
+                            .cloned()
+                            .collect(),
+                    )
+                },
+            );
+            &results
+        }
         HookKind::SessionStart
         | HookKind::UserPromptExpansion
         | HookKind::PreCompact
-        | HookKind::ConfigChange => None,
-    }?;
+        | HookKind::ConfigChange => return None,
+    };
     let mut out = Vec::new();
     if !matches!(target, Value::String(_)) {
         out.extend_from_slice(json::to_string(target).as_bytes());
@@ -542,6 +561,18 @@ mod tests {
         assert!(matches!(d, Decision::Halt(Msg::Paused(..))), "{d:?}");
         let _ = std::fs::remove_dir_all(dir);
         let (m, dir) = machine("batch");
+        // A denied input in the batch is not scanned again: its strike stands.
+        let denied = payload(
+            "PostToolBatch",
+            &format!(
+                r#""tool_calls":[{{"tool_name":"Bash","tool_input":{{"command":"echo {SSN}"}},"tool_response":"denied"}}]"#
+            ),
+        );
+        assert_eq!(
+            decide(HookKind::PostToolBatch, &denied, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        // A result is.
         let batch = payload(
             "PostToolBatch",
             &format!(r#""tool_calls":[{{"tool_name":"Bash","tool_response":"ssn {SSN}"}}]"#),
