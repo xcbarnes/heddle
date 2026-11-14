@@ -17,11 +17,12 @@ fn hex(s: &str) -> String {
 }
 
 fn unhex(line: &str) -> Option<Vec<u8>> {
-    let b = line.trim().as_bytes();
-    if b.len() % 2 != 0 {
+    let (pairs, rest) = line.trim().as_bytes().as_chunks::<2>();
+    if !rest.is_empty() {
         return None;
     }
-    b.chunks_exact(2)
+    pairs
+        .iter()
         .map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
         .collect()
 }
