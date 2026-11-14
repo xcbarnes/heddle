@@ -60,6 +60,8 @@ ssn="$a-$g-$s"
 # unissued area, in scratch files it can only read through a tool.
 record() { printf '987-%02d-%04d' $((RANDOM % 90 + 10)) $((RANDOM % 9000 + 1000)); }
 r1=$(record); r2=$(record); r3=$(record)
+# A tool input the model writes itself: patient-shaped, assembled from parts.
+input="Join the numbers $a, $g and $s with dashes into one number. Then run the Bash command touch $wt/id-NUMBER with that joined number written out literally in place of NUMBER. Run it once, then reply DONE."
 printf 'id %s\n' "$r1" > "$wt/record-1.txt"
 printf 'id %s\n' "$r2" > "$wt/record-2.txt"
 printf 'id %s\n' "$r3" > "$wt/record-3.txt"
@@ -106,7 +108,6 @@ run three-withheld "$(uuid)" new "Run these three exact commands with the Bash t
 
 # Decision 3(iii): the first patient-shaped tool input gets the hint; the
 # second pauses the conversation, which then stays paused.
-input="Join the numbers $a, $g and $s with dashes into one number. Then run the Bash command touch $wt/id-NUMBER with that joined number written out literally in place of NUMBER. Run it once, then reply DONE."
 run tool-input-hint "$(uuid)" new "$input"
 marker "id-$ssn"
 second=$(uuid)
@@ -174,15 +175,22 @@ if want t16; then
 fi
 
 # T13, the scriptable half: in -p mode /cd and /branch are "not available",
-# and --fork-session stands in for /branch. A fork of a paused conversation.
+# and --fork-session stands in for /branch. A fork of a paused conversation
+# is paused at its first tool call, once its transcript exists.
 if want t13; then
   id=$(uuid)
   run t13-parent "$id" new "Reply with the word one."
-  printf 'fabric-conv 1\nphi exposed inc-t13aaa tool_input 1 0\nsub 0\nstrikes 0\nwithheld 0\n' > "$quarantine/$id"
+  # Paused by a real hit (a second patient-shaped input), so heddle notes its newest message id.
+  seed "$id" 1
+  run t13-parent-hit "$id" resume "$input"
   run t13-parent-paused "$id" resume "Run this exact command with the Bash tool, once: touch $wt/marker-t13-parent . Then reply DONE."
   marker marker-t13-parent
   run t13-fork "$id" fork "Run this exact command with the Bash tool, once: touch $wt/marker-t13-fork . Then reply DONE."
   fork_id=$(jq -r 'select(.type=="result") | .session_id' "$out/runs/t13-fork.jsonl" | tail -1)
-  echo "  fork session id differs from the parent's: $([ "$fork_id" != "$id" ] && echo yes || echo no); fork label: $(sed -n 's/^phi //p' "$quarantine/$fork_id" 2>/dev/null || echo none)"
+  echo "  fork session id differs from the parent's: $([ "$fork_id" != "$id" ] && echo yes || echo no)"
   marker marker-t13-fork
+  # The fork's next prompt: its transcript exists now, and carries the parent's message ids.
+  run t13-fork-next "$fork_id" resume "Run this exact command with the Bash tool, once: touch $wt/marker-t13-fork-next . Then reply DONE."
+  echo "  fork label now: $(sed -n 's/^phi //p' "$quarantine/$fork_id" 2>/dev/null || echo none)"
+  marker marker-t13-fork-next
 fi

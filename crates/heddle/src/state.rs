@@ -21,7 +21,7 @@ use fabric_core::phi::{self, Cause, Phi, RuleId};
 
 const FORMAT: &[u8] = b"fabric-conv 1";
 
-/// A conversation's entry.
+/// A conversation's entry. The default is a clean, never-seen conversation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ConvState {
     /// The conversation's label.
@@ -33,6 +33,12 @@ pub struct ConvState {
     pub strikes: u8,
     /// Results withheld since the last prompt (decision 3(ii)).
     pub withheld: u8,
+}
+
+impl Default for ConvState {
+    fn default() -> ConvState {
+        ConvState::CLEAN
+    }
 }
 
 impl ConvState {
@@ -243,6 +249,50 @@ impl Machine {
             self.dir.join("quarantine").join(format!("{c}.transcript")),
             transcript,
         );
+    }
+
+    /// Note the newest message id of a conversation that was just paused. A
+    /// fork keeps its parent's message ids, so finding this one in a fork's
+    /// transcript means the fork carries the paused conversation. Best effort.
+    pub fn note_flagged(&self, c: &ConvId, message_id: &str) {
+        if let Ok(mut f) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(self.dir.join("quarantine").join(format!("{c}.flagged")))
+        {
+            let _ = f.write_all(format!("{message_id}\n").as_bytes());
+        }
+    }
+
+    /// The noted message ids of every conversation that is still paused.
+    pub fn flagged_ids(&self) -> Vec<String> {
+        let q = self.dir.join("quarantine");
+        self.paused()
+            .into_iter()
+            .filter_map(|(conv, _)| fs::read_to_string(q.join(format!("{conv}.flagged"))).ok())
+            .flat_map(|t| t.lines().map(String::from).collect::<Vec<_>>())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// A fork waiting for its check: marked at its SessionStart, checked at
+    /// each blocking hook until its transcript can be read.
+    pub fn mark_fork(&self, c: &ConvId, pending: bool) {
+        let path = self.dir.join("quarantine").join(format!("{c}.fork"));
+        let _ = if pending {
+            fs::write(path, b"")
+        } else {
+            fs::remove_file(path)
+        };
+    }
+
+    /// Whether a fork check is pending for this conversation.
+    pub fn fork_pending(&self, c: &ConvId) -> bool {
+        self.dir
+            .join("quarantine")
+            .join(format!("{c}.fork"))
+            .exists()
     }
 
     /// Every conversation whose label pauses it (Exposed or Sealed, or a file

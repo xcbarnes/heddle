@@ -174,6 +174,22 @@ fn decide(kind: HookKind, line: &Line) -> Option<Decision> {
     Some(decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind)))
 }
 
+/// The newest message id in a transcript, from its last 256 KiB.
+fn last_message_id(path: &str) -> Option<String> {
+    use std::io::Seek;
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    f.seek(std::io::SeekFrom::Start(len.saturating_sub(256 * 1024)))
+        .ok()?;
+    let mut tail = Vec::new();
+    f.read_to_end(&mut tail).ok()?;
+    let text = String::from_utf8_lossy(&tail);
+    let key = "\"uuid\":\"";
+    let at = text.rfind(key)?.checked_add(key.len())?;
+    let id = text.get(at..at.checked_add(36)?)?;
+    ConvId::parse(id.as_bytes()).map(|_| id.to_string())
+}
+
 /// `heddle doctor --canary` run as a Bash call: the live check.
 fn is_canary(v: &Value) -> bool {
     let command = v
@@ -372,6 +388,32 @@ pub fn decide_with(
         | HookKind::ConfigChange => {}
     }
 
+    // Fork matching (T13): a fork gets a new id and no label, but keeps its
+    // parent's message ids. Its transcript is written only after its first
+    // prompt, so it is checked at each blocking hook until it can be read.
+    let transcript = v.get("transcript_path").and_then(Value::as_str);
+    if kind == HookKind::SessionStart && v.get("source").and_then(Value::as_str) == Some("fork") {
+        if !machine.flagged_ids().is_empty() {
+            machine.mark_fork(&conv, true);
+        }
+    } else if machine.fork_pending(&conv)
+        && let Some(bytes) = transcript.and_then(|t| std::fs::read(t).ok())
+    {
+        let text = String::from_utf8_lossy(&bytes);
+        if machine
+            .flagged_ids()
+            .iter()
+            .any(|id| text.contains(id.as_str()))
+        {
+            st.phi = phi::phi_step(st.phi, PhiEvent::Flag { incident }).0;
+            dirty = true;
+            if let Some(t) = transcript {
+                machine.note_transcript(&conv, t);
+            }
+        }
+        machine.mark_fork(&conv, false);
+    }
+
     // Check 1: the effective label, in every folder, before anything else.
     let brake: Brake = phi::effective(&st.phi, &ConvPhi::Clean, None);
     if let Some(d) = hook::brake_gate(kind, brake) {
@@ -410,8 +452,11 @@ pub fn decide_with(
                 Some(out) => {
                     if let Some(ev) = out.event {
                         st.phi = phi::phi_step(st.phi, ev).0;
-                        if let Some(t) = v.get("transcript_path").and_then(Value::as_str) {
+                        if let Some(t) = transcript {
                             machine.note_transcript(&conv, t);
+                            if let Some(id) = last_message_id(t) {
+                                machine.note_flagged(&conv, &id);
+                            }
                         }
                     }
                     if out.strike {
@@ -844,6 +889,100 @@ mod tests {
         assert!(!c("heddle doctor"));
         assert!(!c("echo heddle doctor --canary"));
         assert!(!c("/bin/cat doctor --canary"));
+    }
+
+    #[test]
+    fn t13_a_fork_of_a_paused_conversation_is_paused_once_its_transcript_exists() {
+        let (m, dir) = machine("fork");
+        let parent = "00893aaf-19fa-41d2-8238-13269b9b3ca0";
+        let fork = "00893aaf-19fa-41d2-8238-13269b9b3ca1";
+        let other = "00893aaf-19fa-41d2-8238-13269b9b3ca2";
+        let flagged = "11111111-2222-4333-8444-555555555555";
+        // The parent is paused by a real hit, and its newest message id noted.
+        let parent_log = dir.join("parent.jsonl");
+        std::fs::write(
+            &parent_log,
+            format!(r#"{{"type":"user","uuid":"{flagged}"}}"#),
+        )
+        .expect("write");
+        let hit = format!(
+            r#"{{"session_id":"{parent}","transcript_path":"{}","hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"echo id {SSN}"}}}}"#,
+            parent_log.display()
+        );
+        let conv = ConvId::parse(parent.as_bytes()).expect("conv");
+        m.write_conv(
+            &conv,
+            &crate::state::ConvState {
+                strikes: 1,
+                ..crate::state::ConvState::default()
+            },
+        )
+        .expect("seed");
+        let d = decide(HookKind::PreToolUse, hit.as_bytes(), &m, b"inc-aaaaaa");
+        assert!(matches!(d, Decision::DenyAndStop(Msg::Paused(..))), "{d:?}");
+        // Two forks start; neither transcript exists yet, so both pass and stay pending.
+        let fork_log = dir.join("fork.jsonl");
+        let other_log = dir.join("other.jsonl");
+        let ev = |sid: &str, event: &str, log: &std::path::Path, extra: &str| {
+            format!(
+                r#"{{"session_id":"{sid}","transcript_path":"{}","hook_event_name":"{event}"{extra}}}"#,
+                log.display()
+            )
+        };
+        for (sid, log) in [(fork, &fork_log), (other, &other_log)] {
+            let start = ev(sid, "SessionStart", log, r#","source":"fork""#);
+            assert_eq!(
+                decide(HookKind::SessionStart, start.as_bytes(), &m, b"inc-bbbbbb"),
+                Decision::Pass
+            );
+            let prompt = ev(sid, "UserPromptSubmit", log, r#","prompt":"hello""#);
+            assert_eq!(
+                decide(
+                    HookKind::UserPromptSubmit,
+                    prompt.as_bytes(),
+                    &m,
+                    b"inc-bbbbbb"
+                ),
+                Decision::Pass
+            );
+            assert!(m.fork_pending(&ConvId::parse(sid.as_bytes()).expect("conv")));
+        }
+        // Their transcripts appear: one carries the parent's message id.
+        std::fs::write(&fork_log, format!(r#"{{"uuid":"{flagged}"}}"#)).expect("write");
+        std::fs::write(
+            &other_log,
+            r#"{"uuid":"99999999-2222-4333-8444-555555555555"}"#,
+        )
+        .expect("write");
+        let tool = |sid: &str, log: &std::path::Path| {
+            ev(
+                sid,
+                "PreToolUse",
+                log,
+                r#","tool_name":"Bash","tool_input":{"command":"ls"}"#,
+            )
+        };
+        let d = decide(
+            HookKind::PreToolUse,
+            tool(fork, &fork_log).as_bytes(),
+            &m,
+            b"inc-cccccc",
+        );
+        assert_eq!(
+            d,
+            Decision::DenyAndStop(Msg::StillPaused(inc(b"inc-cccccc")))
+        );
+        assert_eq!(
+            decide(
+                HookKind::PreToolUse,
+                tool(other, &other_log).as_bytes(),
+                &m,
+                b"inc-dddddd"
+            ),
+            Decision::Pass
+        );
+        assert!(!m.fork_pending(&ConvId::parse(other.as_bytes()).expect("conv")));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
