@@ -1,0 +1,42 @@
+name: release
+
+# The only place an installable heddle is built (v01_architecture.md §5.10).
+# A tag v<version> builds the binary from the tagged commit with the locked
+# dependencies, attests the build, and publishes it with its SHA-256. Nothing
+# here installs anything: the admin user verifies the attestation and the hash
+# with `heddle-admin release-record`, and a person runs `sudo heddle setup`.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: The pinned toolchain
+        run: rustup toolchain install
+      - name: The tag names the crate's version
+        run: test "v$(cargo pkgid -p heddle | sed 's/.*[#@]//')" = "$GITHUB_REF_NAME"
+      - name: Build with the locked dependencies
+        run: cargo build --release --locked -p heddle
+      - name: Name the binary and record its SHA-256
+        run: cp target/release/heddle heddle-aarch64-apple-darwin && shasum -a 256 heddle-aarch64-apple-darwin > SHA256SUMS && cat SHA256SUMS
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: heddle-aarch64-apple-darwin
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" heddle-aarch64-apple-darwin SHA256SUMS --verify-tag --prerelease --title "$GITHUB_REF_NAME" --notes "Built by CI from $GITHUB_SHA. Install only through heddle-admin release-record, then sudo heddle setup."
