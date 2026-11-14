@@ -10,8 +10,6 @@ publish.workspace = true
 
 [dependencies]
 fabric-core = { path = "../fabric-core" }
-# Harness payloads only (crate policy). No derive: the payload is read as a Value.
-serde_json = { version = "=1.0.154", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true

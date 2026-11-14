@@ -1,21 +1,25 @@
-//! H1, the PHI half: what each Claude Code hook decides before any
+//! H1, the PHI half: what each Claude Code hook decides, before any
 //! coordination runs. Pure and total; `heddle` does the I/O.
 //!
-//! The PHI checks run first in every hook, in every folder, ignore the `off`
-//! flag and fail closed (H1d, H1e): a check that cannot complete gives the
-//! decision a hit would give, under rule R-00. Every sentence a decision
-//! carries comes from the fixed table in [`text`] (H1c), with grammar values
-//! only: rule ids and incident ids, never payload text.
+//! The seamless design (2026-11-14) with Xavier's decision 3 for PHI-free
+//! repos: a fault before a tool runs costs a retry; a replaced result is
+//! withheld and the conversation goes on (PostToolBatch stops the turn after
+//! three); the
+//! first patient-shaped tool input gets one deny with the made-up-data hint
+//! and a second pauses the conversation. A paused conversation is denied and
+//! stopped (`continue: false`) at every line: two exits only, rewind or a new
+//! session. Every sentence comes from the fixed table in [`text`], with
+//! grammar values only: rule ids and references, never payload text.
 
 use alloc::string::String;
 
 use crate::ids::IncidentId;
 use crate::phi::{Brake, PhiEvent, RuleId};
 
-/// The eight hook lines.
+/// The hook lines.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum HookKind {
-    /// Inject the digest; it cannot deny.
+    /// Session start; it cannot block.
     SessionStart,
     /// Before a prompt is sent.
     UserPromptSubmit,
@@ -61,7 +65,7 @@ impl HookKind {
             HookKind::ConfigChange => "ConfigChange",
         }
     }
-    /// Whether this line carries `onFailure: block` (phi.md §6).
+    /// Whether this line carries `onFailure: "block"`.
     pub const fn is_phi_line(self) -> bool {
         !matches!(self, HookKind::SessionStart | HookKind::ConfigChange)
     }
@@ -70,20 +74,24 @@ impl HookKind {
 /// A fixed sentence and the grammar values it names.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Msg {
-    /// The thread is Exposed.
-    Braked(IncidentId),
-    /// The thread is Sealed.
+    /// A typed prompt was held before it was sent (row I1).
+    Held(RuleId),
+    /// The conversation is paused by this hit (row I2).
+    Paused(RuleId, IncidentId),
+    /// The conversation was paused earlier.
+    StillPaused(IncidentId),
+    /// The conversation is sealed.
     Sealed,
-    /// A typed prompt was held: no expansions or compactions until it passes.
-    Held,
-    /// This prompt was held before it was sent.
-    PromptHeld(RuleId),
-    /// This result was withheld and the thread stopped.
-    ResultWithheld(RuleId, IncidentId),
-    /// The loop was stopped before the next model call.
-    LoopStopped(RuleId, IncidentId),
-    /// A PHI check could not run (R-00).
-    Fault,
+    /// A typed prompt is held: no expansion or compaction until it is rewritten.
+    HeldWaiting,
+    /// The first patient-shaped tool input: denied, with the made-up-data hint.
+    InputHint(RuleId),
+    /// A tool result was withheld; the conversation goes on.
+    Withheld(RuleId),
+    /// Three results withheld in one turn: the turn stops.
+    TurnStopped,
+    /// heddle could not finish its check: a retry (row I3).
+    Hiccup,
 }
 
 /// What a hook prints. `Pass` prints nothing at all: on several events plain
@@ -94,68 +102,96 @@ pub enum Decision {
     Pass,
     /// SessionStart: add the sentence to the context.
     Inject(Msg),
-    /// UserPromptSubmit: block, without echoing the prompt.
-    BlockPrompt(Msg),
+    /// UserPromptSubmit: block. `suppress` leaves the prompt out of the block
+    /// message: set on a detector hit, never on a fault (so it can be copied).
+    BlockPrompt {
+        /// The sentence.
+        msg: Msg,
+        /// Leave the prompt text out of the block message.
+        suppress: bool,
+    },
     /// UserPromptExpansion: block.
     BlockExpansion(Msg),
     /// PreCompact: block.
     BlockCompaction(Msg),
-    /// PreToolUse: deny.
+    /// PreToolUse: deny this call; the turn goes on (a retry, or a first strike).
     Deny(Msg),
-    /// PostToolUse: replace the Bash result with the sentence.
+    /// PreToolUse: deny and stop processing (`continue: false`): the brake.
+    DenyAndStop(Msg),
+    /// PostToolUse: replace the Bash result with the sentence; the turn goes on.
     ReplaceBash(Msg),
     /// PostToolBatch: stop the loop before the next model call.
     StopLoop(Msg),
-    /// Any event: `continue: false`, Claude Code's universal stop. For an
-    /// unknown event, and for a result that cannot be replaced.
+    /// Any event: `continue: false`, Claude Code's universal stop.
     Halt(Msg),
 }
 
-/// The fixed table (CS7). Phrased as facts from a named source.
+/// The fixed table. Plain words; facts, not orders.
 pub fn text(m: &Msg) -> String {
     use core::fmt::Write;
+    const SYNTHETIC: &str = "If this is made-up data, use ids starting SYN-, Social Security numbers in area 000 \
+         or 666, or \"synthetic\": true in JSON; those never trip the check.";
+    const NOBODY: &str = "This is recorded only on this computer; nobody is notified. Most of these are false alarms.";
     let mut s = String::new();
     let _ = match m {
-        Msg::Braked(inc) => write!(
+        Msg::Held(rule) => write!(
             s,
-            "Fabric stopped this thread: possible patient information reached it (incident {inc}). \
-             Rewind to before that turn, scrub it, and have the admin user record the rewind. \
-             Moving the thread to PHI-safe infrastructure is not available yet."
+            "Fabric held this message: something in it looks like patient information (rule {}). \
+             It was not sent to the AI model. {NOBODY} {SYNTHETIC} A copy of the held text remains in \
+             Claude's history on this computer.",
+            rule_name(*rule)
+        ),
+        Msg::Paused(rule, inc) => write!(
+            s,
+            "Fabric paused this conversation: something looks like patient information (rule {}, \
+             reference {}). {NOBODY} To carry on: start a new session. Or rewind: /rewind, pick the \
+             message before this one, choose Restore conversation, then edit and send.",
+            rule_name(*rule),
+            reference(inc)
+        ),
+        Msg::StillPaused(inc) => write!(
+            s,
+            "Fabric paused this conversation earlier: something looked like patient information \
+             (reference {}). To carry on: start a new session. Or rewind: /rewind, pick the message \
+             before it, choose Restore conversation, then edit and send.",
+            reference(inc)
         ),
         Msg::Sealed => write!(
             s,
-            "Fabric sealed this thread: a person confirmed patient information reached it."
+            "Fabric sealed this conversation. Start a new session to carry on."
         ),
-        Msg::Held => write!(
+        Msg::HeldWaiting => write!(
             s,
-            "Fabric is holding a prompt in this thread: possible patient information. \
-             Rewrite the prompt without patient details and send it again first."
+            "Fabric is holding a message in this conversation: rewrite it without patient details and \
+             send it again first."
         ),
-        Msg::PromptHeld(rule) => write!(
+        Msg::InputHint(rule) => write!(
             s,
-            "Fabric held this prompt: possible patient information (rule {}). It was not sent. \
-             Rewrite it without patient details and send again.",
+            "Fabric blocked this tool call: its input looks like patient information (rule {}). \
+             {SYNTHETIC} A second one in this conversation pauses it.",
             rule_name(*rule)
         ),
-        Msg::ResultWithheld(rule, inc) => write!(
+        Msg::Withheld(rule) => write!(
             s,
-            "Fabric withheld this result and stopped this thread: possible patient information \
-             (rule {}, incident {inc}).",
+            "Fabric withheld this result: it looks like patient information (rule {}). {SYNTHETIC} \
+             The conversation goes on.",
             rule_name(*rule)
         ),
-        Msg::LoopStopped(rule, inc) => write!(
+        Msg::TurnStopped => write!(
             s,
-            "Fabric stopped this thread before the next model call: possible patient information \
-             (rule {}, incident {inc}).",
-            rule_name(*rule)
+            "Fabric stopped this turn: three tool results in it looked like patient information and \
+             were withheld. {SYNTHETIC} The conversation goes on with your next message."
         ),
-        Msg::Fault => write!(
-            s,
-            "Fabric's PHI check could not run (rule R-00), so this was blocked. \
-             A person must repair heddle from the admin user."
-        ),
+        Msg::Hiccup => write!(s, "Fabric had a hiccup and found nothing. Try it again."),
     };
     s
+}
+
+/// A reference a person can quote: the incident id without its prefix.
+fn reference(inc: &IncidentId) -> String {
+    use alloc::string::ToString;
+    let full = inc.to_string();
+    full.strip_prefix("inc-").map(String::from).unwrap_or(full)
 }
 
 /// A rule's printed id.
@@ -177,37 +213,17 @@ pub const fn rule_name(r: RuleId) -> &'static str {
     }
 }
 
-/// Check 1 of every hook: the effective label (T6). `None` means go on to
-/// the scan.
-pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
-    let stop = match brake {
-        Brake::Clear => return None,
-        Brake::Held => {
-            // Held blocks only what would send the held text onward.
-            return match kind {
-                HookKind::UserPromptExpansion => Some(Decision::BlockExpansion(Msg::Held)),
-                HookKind::PreCompact => Some(Decision::BlockCompaction(Msg::Held)),
-                HookKind::SessionStart
-                | HookKind::UserPromptSubmit
-                | HookKind::PreToolUse
-                | HookKind::PostToolUse
-                | HookKind::PostToolBatch
-                | HookKind::ConfigChange => None,
-            };
-        }
-        Brake::Exposed(inc) => Msg::Braked(inc),
-        Brake::Sealed => Msg::Sealed,
-    };
-    Some(stopped(kind, stop))
-}
-
-/// The decision that stops this hook's action, with `m`.
+/// The decision that stops this hook's action with `m`, for a paused
+/// conversation.
 fn stopped(kind: HookKind, m: Msg) -> Decision {
     match kind {
         HookKind::SessionStart => Decision::Inject(m),
-        HookKind::UserPromptSubmit => Decision::BlockPrompt(m),
+        HookKind::UserPromptSubmit => Decision::BlockPrompt {
+            msg: m,
+            suppress: false,
+        },
         HookKind::UserPromptExpansion => Decision::BlockExpansion(m),
-        HookKind::PreToolUse => Decision::Deny(m),
+        HookKind::PreToolUse => Decision::DenyAndStop(m),
         HookKind::PostToolUse => Decision::Halt(m),
         HookKind::PostToolBatch => Decision::StopLoop(m),
         HookKind::PreCompact => Decision::BlockCompaction(m),
@@ -215,62 +231,100 @@ fn stopped(kind: HookKind, m: Msg) -> Decision {
     }
 }
 
-/// A PHI check could not complete: the decision a hit would give (H1e).
-pub fn fault(kind: HookKind) -> Decision {
-    stopped(kind, Msg::Fault)
+/// Check 1 of every hook: the conversation's label (T6). `None`: go on.
+pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
+    match brake {
+        Brake::Clear => None,
+        Brake::Held => match kind {
+            HookKind::UserPromptExpansion => Some(Decision::BlockExpansion(Msg::HeldWaiting)),
+            HookKind::PreCompact => Some(Decision::BlockCompaction(Msg::HeldWaiting)),
+            HookKind::SessionStart
+            | HookKind::UserPromptSubmit
+            | HookKind::PreToolUse
+            | HookKind::PostToolUse
+            | HookKind::PostToolBatch
+            | HookKind::ConfigChange => None,
+        },
+        Brake::Exposed(inc) => Some(stopped(kind, Msg::StillPaused(inc))),
+        Brake::Sealed => Some(stopped(kind, Msg::Sealed)),
+    }
 }
 
-/// What the edge knows about this hook's moment.
+/// heddle could not finish its check (rule R-00). Before a tool runs that
+/// costs a retry and raises no label (decision 3(i)). After a tool has run,
+/// the turn stops; PostToolBatch's own scan of the same results is the net.
+pub fn fault(kind: HookKind) -> Decision {
+    match kind {
+        HookKind::SessionStart | HookKind::ConfigChange => Decision::Pass,
+        HookKind::UserPromptSubmit => Decision::BlockPrompt {
+            msg: Msg::Hiccup,
+            suppress: false,
+        },
+        HookKind::UserPromptExpansion => Decision::BlockExpansion(Msg::Hiccup),
+        HookKind::PreToolUse => Decision::Deny(Msg::Hiccup),
+        HookKind::PostToolUse => Decision::Halt(Msg::Hiccup),
+        HookKind::PostToolBatch => Decision::StopLoop(Msg::Hiccup),
+        HookKind::PreCompact => Decision::BlockCompaction(Msg::Hiccup),
+    }
+}
+
+/// What the edge knows about this moment.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScanCtx {
-    /// Rule hits block here: an enrolled repo or a path inside one (B10).
-    /// R-00 blocks everywhere regardless.
-    pub enforce: bool,
-    /// UserPromptSubmit: a person typed the prompt, by the conservative rule
-    /// (no subagent hook since the last prompt).
+    /// UserPromptSubmit: a person typed the prompt (no subagent hook since
+    /// the last prompt: the conservative rule of M13).
     pub person_typed: bool,
     /// PostToolUse: this tool's result has a known shape to replace.
     pub can_replace: bool,
-    /// PostToolUse: the result passed a model before the hook (web fetch, a
-    /// subagent).
+    /// PostToolUse: the result passed a model before the hook (web fetch, a subagent).
     pub passed_model: bool,
+    /// Patient-shaped tool inputs already denied in this conversation.
+    pub input_strikes: u8,
 }
 
-/// The first blocking hit in this hook's text: the decision, and the event
-/// for the label machine. `None` when the hit only counts.
+/// The outcome of a hit: what to print, the label event if the conversation
+/// pauses, and the counters to bump.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HitOutcome {
+    /// What the hook prints.
+    pub decision: Decision,
+    /// The label event, when the hit pauses the conversation or holds a prompt.
+    pub event: Option<PhiEvent>,
+    /// A first patient-shaped tool input was denied.
+    pub strike: bool,
+    /// A result was withheld.
+    pub withheld: bool,
+}
+
+/// The first blocking hit in this hook's text. `None` when the hit only
+/// counts (R-08, content the rules cannot read).
 pub fn on_hit(
     kind: HookKind,
     rule: RuleId,
     ctx: &ScanCtx,
     incident: IncidentId,
-) -> Option<(Decision, PhiEvent)> {
-    let counts_only = match rule {
-        RuleId::R00 => false,
-        RuleId::R08 => true,
-        RuleId::R01
-        | RuleId::R02
-        | RuleId::R03
-        | RuleId::R04
-        | RuleId::R05
-        | RuleId::R06
-        | RuleId::R07
-        | RuleId::R09
-        | RuleId::R10
-        | RuleId::R11
-        | RuleId::R12 => !ctx.enforce,
-    };
-    if counts_only {
+) -> Option<HitOutcome> {
+    if rule == RuleId::R08 {
         return None;
     }
+    let pause = |decision: Decision, event: PhiEvent| HitOutcome {
+        decision,
+        event: Some(event),
+        strike: false,
+        withheld: false,
+    };
     match kind {
         HookKind::UserPromptSubmit => {
-            let m = if ctx.person_typed {
-                Msg::PromptHeld(rule)
+            let msg = if ctx.person_typed {
+                Msg::Held(rule)
             } else {
-                Msg::Braked(incident)
+                Msg::Paused(rule, incident)
             };
-            Some((
-                Decision::BlockPrompt(m),
+            Some(pause(
+                Decision::BlockPrompt {
+                    msg,
+                    suppress: true,
+                },
                 PhiEvent::PromptHit {
                     rule,
                     person_typed: ctx.person_typed,
@@ -278,29 +332,34 @@ pub fn on_hit(
                 },
             ))
         }
-        HookKind::PreToolUse => Some((
-            Decision::Deny(Msg::Braked(incident)),
+        HookKind::PreToolUse if ctx.input_strikes == 0 => Some(HitOutcome {
+            decision: Decision::Deny(Msg::InputHint(rule)),
+            event: None,
+            strike: true,
+            withheld: false,
+        }),
+        HookKind::PreToolUse => Some(pause(
+            Decision::DenyAndStop(Msg::Paused(rule, incident)),
             PhiEvent::ToolInputHit { rule, incident },
         )),
-        HookKind::PostToolUse => {
-            let replace = ctx.can_replace && !ctx.passed_model;
-            let m = Msg::ResultWithheld(rule, incident);
-            let d = if replace {
-                Decision::ReplaceBash(m)
-            } else {
-                Decision::Halt(m)
-            };
-            let ev = PhiEvent::ResultHit {
+        HookKind::PostToolUse if ctx.can_replace && !ctx.passed_model => Some(HitOutcome {
+            decision: Decision::ReplaceBash(Msg::Withheld(rule)),
+            event: None,
+            strike: false,
+            withheld: true,
+        }),
+        HookKind::PostToolUse => Some(pause(
+            Decision::Halt(Msg::Paused(rule, incident)),
+            PhiEvent::ResultHit {
                 rule,
-                can_replace: replace,
+                can_replace: false,
                 can_stop: true,
                 passed_model: ctx.passed_model,
                 incident,
-            };
-            Some((d, ev))
-        }
-        HookKind::PostToolBatch => Some((
-            Decision::StopLoop(Msg::LoopStopped(rule, incident)),
+            },
+        )),
+        HookKind::PostToolBatch => Some(pause(
+            Decision::StopLoop(Msg::Paused(rule, incident)),
             PhiEvent::BatchHit { rule, incident },
         )),
         HookKind::SessionStart
@@ -308,6 +367,14 @@ pub fn on_hit(
         | HookKind::PreCompact
         | HookKind::ConfigChange => None,
     }
+}
+
+/// After a clean batch scan: three results withheld in this turn stop it
+/// (decision 3(ii)). PostToolBatch's block is verified (day 0), and the
+/// replacements are already in the transcript.
+pub fn turn_gate(kind: HookKind, withheld_this_turn: u8) -> Option<Decision> {
+    (kind == HookKind::PostToolBatch && withheld_this_turn >= 3)
+        .then_some(Decision::StopLoop(Msg::TurnStopped))
 }
 
 #[cfg(test)]
@@ -327,7 +394,16 @@ mod tests {
     ];
 
     fn inc() -> IncidentId {
-        IncidentId::parse(b"inc-aaaaaa").expect("an incident id")
+        IncidentId::parse(b"inc-k3q9x2").expect("an incident id")
+    }
+
+    fn ctx() -> ScanCtx {
+        ScanCtx {
+            person_typed: true,
+            can_replace: true,
+            passed_model: false,
+            input_strikes: 0,
+        }
     }
 
     #[test]
@@ -336,100 +412,125 @@ mod tests {
             assert_eq!(HookKind::parse(k.name().as_bytes()), Some(k));
         }
         assert_eq!(HookKind::parse(b"Stop"), None);
-        assert_eq!(HookKind::parse(b"pretooluse"), None);
     }
 
     #[test]
-    fn h1e_a_fault_stops_every_phi_line() {
+    fn a_paused_conversation_is_stopped_at_every_phi_line() {
         for k in KINDS {
-            let d = fault(k);
-            assert_eq!(
-                d == Decision::Pass,
-                !k.is_phi_line() && k != HookKind::SessionStart,
-                "{k:?}"
-            );
+            let d = brake_gate(k, Brake::Exposed(inc()));
             if k.is_phi_line() {
-                assert_ne!(d, Decision::Pass, "{k:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn t6_exposed_and_sealed_stop_every_phi_line_and_held_blocks_onward_sends() {
-        for k in KINDS {
-            for b in [Brake::Exposed(inc()), Brake::Sealed] {
-                let d = brake_gate(k, b);
-                assert!(
-                    d.is_some() && (d != Some(Decision::Pass) || k == HookKind::ConfigChange),
-                    "{k:?} {b:?}"
-                );
+                assert!(d.is_some_and(|d| d != Decision::Pass), "{k:?}");
             }
             assert_eq!(brake_gate(k, Brake::Clear), None);
-            let held = brake_gate(k, Brake::Held);
-            let onward = matches!(k, HookKind::UserPromptExpansion | HookKind::PreCompact);
-            assert_eq!(held.is_some(), onward, "{k:?}");
+        }
+        assert_eq!(
+            brake_gate(HookKind::PreToolUse, Brake::Exposed(inc())),
+            Some(Decision::DenyAndStop(Msg::StillPaused(inc())))
+        );
+    }
+
+    #[test]
+    fn decision_3_a_fault_before_a_tool_is_a_retry_and_never_suppresses_the_prompt() {
+        assert_eq!(fault(HookKind::PreToolUse), Decision::Deny(Msg::Hiccup));
+        assert_eq!(
+            fault(HookKind::UserPromptSubmit),
+            Decision::BlockPrompt {
+                msg: Msg::Hiccup,
+                suppress: false
+            }
+        );
+        for k in KINDS {
+            assert_eq!(fault(k) == Decision::Pass, !k.is_phi_line(), "{k:?}");
         }
     }
 
     #[test]
-    fn r00_blocks_everywhere_other_rules_only_where_enforced_and_r08_only_counts() {
-        let ctx = ScanCtx {
-            enforce: false,
-            person_typed: true,
-            can_replace: true,
-            passed_model: false,
-        };
-        assert!(on_hit(HookKind::PreToolUse, RuleId::R00, &ctx, inc()).is_some());
-        assert!(on_hit(HookKind::PreToolUse, RuleId::R01, &ctx, inc()).is_none());
-        let on = ScanCtx {
-            enforce: true,
-            ..ctx
-        };
-        assert!(on_hit(HookKind::PreToolUse, RuleId::R01, &on, inc()).is_some());
-        assert!(on_hit(HookKind::PreToolUse, RuleId::R08, &on, inc()).is_none());
+    fn decision_3_the_first_tool_input_is_a_hint_and_the_second_pauses() {
+        let first = on_hit(HookKind::PreToolUse, RuleId::R09, &ctx(), inc()).expect("a hit");
+        assert_eq!(first.decision, Decision::Deny(Msg::InputHint(RuleId::R09)));
+        assert!(first.strike && first.event.is_none());
+        let second = on_hit(
+            HookKind::PreToolUse,
+            RuleId::R09,
+            &ScanCtx {
+                input_strikes: 1,
+                ..ctx()
+            },
+            inc(),
+        )
+        .expect("a hit");
+        assert!(matches!(
+            second.decision,
+            Decision::DenyAndStop(Msg::Paused(..))
+        ));
+        assert!(matches!(second.event, Some(PhiEvent::ToolInputHit { .. })));
     }
 
     #[test]
-    fn a_result_is_replaced_only_when_its_shape_is_known_and_no_model_saw_it() {
-        let base = ScanCtx {
-            enforce: true,
-            person_typed: true,
-            can_replace: true,
-            passed_model: false,
-        };
-        let hit =
-            |ctx: ScanCtx| on_hit(HookKind::PostToolUse, RuleId::R03, &ctx, inc()).map(|(d, _)| d);
-        assert!(matches!(hit(base), Some(Decision::ReplaceBash(_))));
-        assert!(matches!(
-            hit(ScanCtx {
+    fn decision_3_results_are_withheld_and_the_third_in_a_turn_stops_it() {
+        let one = on_hit(HookKind::PostToolUse, RuleId::R01, &ctx(), inc()).expect("a hit");
+        assert_eq!(
+            one.decision,
+            Decision::ReplaceBash(Msg::Withheld(RuleId::R01))
+        );
+        assert!(one.withheld && one.event.is_none());
+        assert_eq!(turn_gate(HookKind::PostToolBatch, 2), None);
+        assert_eq!(
+            turn_gate(HookKind::PostToolBatch, 3),
+            Some(Decision::StopLoop(Msg::TurnStopped))
+        );
+        assert_eq!(turn_gate(HookKind::PostToolUse, 3), None);
+        // A result that cannot be replaced, or that a model saw first, pauses the conversation.
+        let read = on_hit(
+            HookKind::PostToolUse,
+            RuleId::R01,
+            &ScanCtx {
                 can_replace: false,
-                ..base
-            }),
-            Some(Decision::Halt(_))
-        ));
-        assert!(matches!(
-            hit(ScanCtx {
+                ..ctx()
+            },
+            inc(),
+        )
+        .expect("a hit");
+        assert!(matches!(read.decision, Decision::Halt(Msg::Paused(..))) && read.event.is_some());
+        let web = on_hit(
+            HookKind::PostToolUse,
+            RuleId::R01,
+            &ScanCtx {
                 passed_model: true,
-                ..base
-            }),
-            Some(Decision::Halt(_))
-        ));
+                ..ctx()
+            },
+            inc(),
+        )
+        .expect("a hit");
+        assert!(web.event.is_some());
+    }
+
+    #[test]
+    fn a_typed_prompt_is_held_and_r08_only_counts() {
+        let held = on_hit(HookKind::UserPromptSubmit, RuleId::R04, &ctx(), inc()).expect("a hit");
+        assert_eq!(
+            held.decision,
+            Decision::BlockPrompt {
+                msg: Msg::Held(RuleId::R04),
+                suppress: true
+            }
+        );
+        assert!(on_hit(HookKind::PreToolUse, RuleId::R08, &ctx(), inc()).is_none());
     }
 
     #[test]
     fn the_sentences_name_grammar_values_only() {
-        let t = text(&Msg::ResultWithheld(RuleId::R01, inc()));
-        assert!(t.contains("rule R-01") && t.contains("inc-aaaaaa"));
-        assert!(t.is_ascii());
+        let t = text(&Msg::Paused(RuleId::R09, inc()));
+        assert!(t.contains("rule R-09") && t.contains("reference k3q9x2") && !t.contains("inc-"));
         for m in [
-            Msg::Braked(inc()),
-            Msg::Sealed,
-            Msg::Held,
-            Msg::PromptHeld(RuleId::R04),
-            Msg::Fault,
+            Msg::Held(RuleId::R01),
+            Msg::StillPaused(inc()),
+            Msg::InputHint(RuleId::R03),
+            Msg::Withheld(RuleId::R12),
+            Msg::Hiccup,
         ] {
             let s = text(&m);
-            assert!(!s.is_empty() && s.is_ascii() && s.len() < 400, "{m:?}");
+            assert!(!s.is_empty() && s.is_ascii() && s.len() < 600, "{m:?}");
         }
     }
 }

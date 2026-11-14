@@ -1,4 +1,7 @@
-//! The machine folder (L0): `~/Library/Application Support/fabric/machine`.
+//! The state folder (L0), named by the hook line's `--state` argument; setup
+//! makes it `~/Library/Application Support/fabric/machine`. heddle reads no
+//! environment variable to find it, and a folder that does not exist is a
+//! fault (R-00), never an empty store.
 //!
 //! One file per conversation in `quarantine/` holds that conversation's PHI
 //! label, so a thread that fired is braked wherever it is resumed, forked or
@@ -26,12 +29,18 @@ pub struct ConvState {
     /// A subagent's hook has run since the last prompt, so the next prompt is
     /// not counted as typed by a person (the conservative rule of M13).
     pub sub_since_prompt: bool,
+    /// Patient-shaped tool inputs denied in this conversation (decision 3(iii)).
+    pub strikes: u8,
+    /// Results withheld since the last prompt (decision 3(ii)).
+    pub withheld: u8,
 }
 
 impl ConvState {
     const CLEAN: ConvState = ConvState {
         phi: Phi::Clean,
         sub_since_prompt: false,
+        strikes: 0,
+        withheld: 0,
     };
 
     fn braked(incident: IncidentId) -> ConvState {
@@ -43,6 +52,8 @@ impl ConvState {
                 acked: false,
             },
             sub_since_prompt: true,
+            strikes: 0,
+            withheld: 0,
         }
     }
 
@@ -52,10 +63,13 @@ impl ConvState {
         out.extend_from_slice(b"\nphi ");
         out.extend_from_slice(phi::encode_phi(&self.phi).as_bytes());
         out.extend_from_slice(if self.sub_since_prompt {
-            b"\nsub 1\n"
+            b"\nsub 1"
         } else {
-            b"\nsub 0\n"
+            b"\nsub 0"
         });
+        out.extend_from_slice(
+            format!("\nstrikes {}\nwithheld {}\n", self.strikes, self.withheld).as_bytes(),
+        );
         out
     }
 
@@ -70,10 +84,21 @@ impl ConvState {
             b"sub 1" => true,
             _ => return None,
         };
+        let mut count = |key: &[u8]| -> Option<u8> {
+            let digits = lines.next()?.strip_prefix(key)?;
+            if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+                return None;
+            }
+            core::str::from_utf8(digits).ok()?.parse().ok()
+        };
+        let strikes = count(b"strikes ")?;
+        let withheld = count(b"withheld ")?;
         let rest_empty = lines.all(|l| l.is_empty());
         rest_empty.then_some(ConvState {
             phi,
             sub_since_prompt: sub,
+            strikes,
+            withheld,
         })
     }
 }
@@ -85,18 +110,19 @@ pub struct Machine {
 }
 
 impl Machine {
-    /// The everyday user's folder, created 0700 if missing.
-    pub fn open() -> io::Result<Machine> {
-        let home = std::env::var_os("HOME").ok_or_else(|| io::Error::other("HOME is not set"))?;
-        Machine::at(PathBuf::from(home).join("Library/Application Support/fabric/machine"))
-    }
-
-    /// A folder at `dir`, created 0700 if missing.
-    pub fn at(dir: PathBuf) -> io::Result<Machine> {
-        fs::DirBuilder::new()
-            .recursive(true)
+    /// The state folder at `dir`, which must exist. Its `quarantine/` is
+    /// created 0700 if missing: a missing label file is "no entry" anyway.
+    pub fn open(dir: PathBuf) -> io::Result<Machine> {
+        if !fs::metadata(&dir)?.is_dir() {
+            return Err(io::Error::other("the state folder is not a folder"));
+        }
+        match fs::DirBuilder::new()
             .mode(0o700)
-            .create(dir.join("quarantine"))?;
+            .create(dir.join("quarantine"))
+        {
+            Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
+            Ok(()) | Err(_) => {}
+        }
         Ok(Machine { dir })
     }
 
@@ -179,6 +205,8 @@ mod tests {
             ConvState {
                 phi: Phi::Held,
                 sub_since_prompt: true,
+                strikes: 1,
+                withheld: 255,
             },
             ConvState::braked(inc),
         ] {
@@ -186,9 +214,12 @@ mod tests {
         }
         for bad in [
             &b""[..],
-            b"fabric-conv 2\nphi clean\nsub 0\n",
-            b"fabric-conv 1\nphi clean\n",
-            b"fabric-conv 1\nphi clean\nsub 2\n",
+            b"fabric-conv 2\nphi clean\nsub 0\nstrikes 0\nwithheld 0\n",
+            b"fabric-conv 1\nphi clean\nsub 0\n",
+            b"fabric-conv 1\nphi clean\nsub 2\nstrikes 0\nwithheld 0\n",
+            b"fabric-conv 1\nphi clean\nsub 0\nstrikes +1\nwithheld 0\n",
+            b"fabric-conv 1\nphi clean\nsub 0\nstrikes 0\nwithheld 256\n",
+            b"fabric-conv 1\nphi clean\nsub 0\nstrikes 0\nwithheld 0\nmore\n",
         ] {
             assert_eq!(ConvState::decode(bad), None);
         }
@@ -198,14 +229,19 @@ mod tests {
     fn writes_land_whole_and_read_back() {
         let dir = std::env::temp_dir().join(format!("heddle-state-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        let m = Machine::at(dir.clone()).expect("folder");
+        assert!(
+            Machine::open(dir.clone()).is_err(),
+            "a missing state folder is a fault"
+        );
+        fs::create_dir(&dir).expect("folder");
+        let m = Machine::open(dir.clone()).expect("folder");
         let c = ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca0").expect("conv");
         let fresh = IncidentId::parse(b"inc-bbbbbb").expect("id");
         assert_eq!(m.read_conv(&c, fresh), (ConvState::CLEAN, false));
         let _lock = m.lock().expect("lock");
         let held = ConvState {
             phi: Phi::Held,
-            sub_since_prompt: false,
+            ..ConvState::CLEAN
         };
         m.write_conv(&c, &held).expect("write");
         assert_eq!(m.read_conv(&c, fresh), (held, false));

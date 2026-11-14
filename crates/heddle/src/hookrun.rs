@@ -1,4 +1,9 @@
-//! `heddle hook claude-code <Event>`: the PHI checks of every hook line.
+//! `heddle hook claude-code <Event> --root <main checkout> --state <folder>`:
+//! the PHI checks of every hook line.
+//!
+//! The hook line's presence is the enrolment: every invocation enforces, and
+//! the two absolute arguments are the only way heddle finds its state (no
+//! environment variable, so a pulled `env` block cannot point it elsewhere).
 //!
 //! The order of the first three things is the safety argument:
 //! 1. the watchdog is armed before any read (decision new-15): a heddle that
@@ -7,60 +12,82 @@
 //! 2. the panic hook prints one fixed line, so a panic message, which can
 //!    quote data, never reaches a model;
 //! 3. everything else runs inside `catch_unwind`, and any fault becomes the
-//!    decision a hit would give (rule R-00). Bad arguments, an unknown harness
-//!    and an unknown event are faults too.
+//!    fault decision (rule R-00). Bad arguments, an unknown harness, an
+//!    unknown event and a missing state folder are faults too.
 //!
 //! Exit codes (§5.4): 0 with one complete JSON object, or with nothing for a
 //! pass. The only deliberate non-zero exits are the watchdog's and a stop
 //! that could not be printed; both make the harness block.
 
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
 use fabric_core::detect;
 use fabric_core::hook::{self, Decision, HookKind, Msg, ScanCtx};
 use fabric_core::ids::{ConvId, IncidentId};
+use fabric_core::json::{self, Value};
 use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent};
-use serde_json::{Value, json};
 
 use crate::state::Machine;
 
-/// Shorter than the 10-second timeout `setup` gives every PHI line.
+/// Shorter than the 10-second timeout setup gives every PHI line.
 const WATCHDOG: Duration = Duration::from_millis(8_000);
 /// The one deliberate non-zero status.
 const STOPPED: u8 = 3;
 /// Payload caps (§5.4): 256 KiB, and 4 MiB for the events that carry results.
 const CAP: usize = 256 * 1024;
 const CAP_RESULTS: usize = 4 * 1024 * 1024;
-/// heddle lives at `<root>/bin/<version>/heddle` and its policy at
-/// `<root>/etc/`: root-owned `/usr/local/fabric` once installed. There is no
-/// environment override, so an agent cannot point a hook at other policy.
-fn etc_dir() -> Option<std::path::PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    Some(exe.parent()?.parent()?.parent()?.join("etc"))
-}
 
 /// A PHI check that could not complete.
 #[derive(Debug)]
 pub struct Fault;
 
-/// The entry point. Never returns an error: it decides, or it fails closed.
-pub fn run(harness: Option<&str>, event: Option<&str>) -> ExitCode {
+/// The entry point, with the arguments after `hook`. Never returns an error:
+/// it decides, or it fails closed.
+pub fn run(args: &[String]) -> ExitCode {
     let armed = arm_watchdog();
     std::panic::set_hook(Box::new(|_| {
         let _ = std::io::stderr().write_all(b"heddle: internal fault (R-00)\n");
     }));
-    let kind = event.and_then(|e| HookKind::parse(e.as_bytes()));
-    let decision = match (harness, kind) {
-        (Some("claude-code"), Some(k)) if armed => {
-            std::panic::catch_unwind(|| decide(k)).unwrap_or_else(|_| hook::fault(k))
+    let kind = match args {
+        [harness, event, ..] if harness == "claude-code" => HookKind::parse(event.as_bytes()),
+        _ => None,
+    };
+    let Some(kind) = kind else {
+        return emit(Decision::Halt(Msg::Hiccup));
+    };
+    let decision = match state_arg(args.get(2..).unwrap_or_default()) {
+        Some(state) if armed => {
+            std::panic::catch_unwind(|| decide(kind, &state)).unwrap_or_else(|_| hook::fault(kind))
         }
-        (Some("claude-code"), Some(k)) => hook::fault(k),
-        _ => Decision::Halt(Msg::Fault),
+        Some(_) | None => hook::fault(kind),
     };
     emit(decision)
+}
+
+/// `--root <abs> --state <abs>`, each exactly once, both absolute. Returns the
+/// state folder. The root is required now so the wiring is final; the room
+/// and the second label copy read it.
+fn state_arg(rest: &[String]) -> Option<PathBuf> {
+    let (pairs, odd) = rest.as_chunks::<2>();
+    if !odd.is_empty() {
+        return None;
+    }
+    let (mut root, mut state) = (None, None);
+    for [flag, value] in pairs {
+        let slot = match flag.as_str() {
+            "--root" => &mut root,
+            "--state" => &mut state,
+            _ => return None,
+        };
+        if slot.replace(Path::new(value)).is_some() || !Path::new(value).is_absolute() {
+            return None;
+        }
+    }
+    root?;
+    state.map(Path::to_path_buf)
 }
 
 /// The watchdog. If it cannot be armed, the hook fails closed.
@@ -76,30 +103,20 @@ fn arm_watchdog() -> bool {
         .is_ok()
 }
 
-fn decide(kind: HookKind) -> Decision {
-    let Some(etc) = etc_dir() else {
+fn decide(kind: HookKind, state: &Path) -> Decision {
+    let Ok(payload) = read_payload(kind) else {
         return hook::fault(kind);
     };
-    let enrolled = match read_enrolled(&etc.join("enrolled")) {
-        Ok(e) => e,
-        Err(Fault) => return hook::fault(kind),
+    let Ok(machine) = Machine::open(state.to_path_buf()) else {
+        return hook::fault(kind);
     };
-    let payload = match read_payload(kind) {
-        Ok(p) => p,
-        Err(Fault) => return hook::fault(kind),
+    let Some(inc) = fresh_incident() else {
+        return hook::fault(kind);
     };
-    let machine = match Machine::open() {
-        Ok(m) => m,
-        Err(_) => return hook::fault(kind),
-    };
-    match fresh_incident() {
-        Some(inc) => decide_with(kind, &payload, &machine, &enrolled, inc)
-            .unwrap_or_else(|Fault| hook::fault(kind)),
-        None => hook::fault(kind),
-    }
+    decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind))
 }
 
-/// Read the payload, capped. A payload over the cap is R-07 and blocks.
+/// Read the payload, capped. A payload over the cap is a fault.
 fn read_payload(kind: HookKind) -> Result<Vec<u8>, Fault> {
     let cap = if matches!(kind, HookKind::PostToolUse | HookKind::PostToolBatch) {
         CAP_RESULTS
@@ -114,35 +131,6 @@ fn read_payload(kind: HookKind) -> Result<Vec<u8>, Fault> {
         .read_to_end(&mut buf)
         .map_err(|_| Fault)?;
     if buf.len() > cap { Err(Fault) } else { Ok(buf) }
-}
-
-/// The enrolled roots. No file means nothing is enrolled; a file that cannot
-/// be read is a fault.
-fn read_enrolled(path: &Path) -> Result<Vec<String>, Fault> {
-    match std::fs::read(path) {
-        Ok(bytes) => {
-            let text = String::from_utf8(bytes).map_err(|_| Fault)?;
-            Ok(text
-                .lines()
-                .map(str::trim)
-                .filter(|l| l.starts_with('/'))
-                .map(String::from)
-                .collect())
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
-        Err(_) => Err(Fault),
-    }
-}
-
-/// Whether `cwd` is an enrolled root or inside one.
-fn enforced(cwd: &str, enrolled: &[String]) -> bool {
-    enrolled.iter().any(|root| {
-        let root = root.trim_end_matches('/');
-        cwd == root
-            || cwd
-                .strip_prefix(root)
-                .is_some_and(|rest| rest.starts_with('/'))
-    })
 }
 
 /// A random incident id, from the kernel's generator.
@@ -163,7 +151,7 @@ fn fresh_incident() -> Option<IncidentId> {
 /// Everything a hook scans, as one buffer: the JSON text of a structured value
 /// (so record keys such as `"first_name":` show), then each string raw (so
 /// line-based formats such as HL7 show).
-fn scan_text(kind: HookKind, v: &Value) -> Result<Option<Vec<u8>>, Fault> {
+fn scan_text(kind: HookKind, v: &Value) -> Option<Vec<u8>> {
     let target = match kind {
         HookKind::UserPromptSubmit => v.get("prompt"),
         HookKind::PreToolUse => v.get("tool_input"),
@@ -173,29 +161,17 @@ fn scan_text(kind: HookKind, v: &Value) -> Result<Option<Vec<u8>>, Fault> {
         | HookKind::UserPromptExpansion
         | HookKind::PreCompact
         | HookKind::ConfigChange => None,
-    };
-    let Some(target) = target else {
-        return Ok(None);
-    };
+    }?;
     let mut out = Vec::new();
-    if !target.is_string() {
-        // A value that cannot be shown to the scanner is a fault, never a pass.
-        out.extend_from_slice(serde_json::to_string(target).map_err(|_| Fault)?.as_bytes());
+    if !matches!(target, Value::String(_)) {
+        out.extend_from_slice(json::to_string(target).as_bytes());
         out.push(b'\n');
     }
-    let mut stack = vec![target];
-    while let Some(x) = stack.pop() {
-        match x {
-            Value::String(s) => {
-                out.extend_from_slice(s.as_bytes());
-                out.push(b'\n');
-            }
-            Value::Array(a) => stack.extend(a.iter().rev()),
-            Value::Object(o) => stack.extend(o.values().rev()),
-            Value::Null | Value::Bool(_) | Value::Number(_) => {}
-        }
+    for s in target.strings() {
+        out.extend_from_slice(s.as_bytes());
+        out.push(b'\n');
     }
-    Ok(Some(out))
+    Some(out)
 }
 
 /// The decision, given everything read from the edge. Faults are `Err`.
@@ -203,11 +179,10 @@ pub fn decide_with(
     kind: HookKind,
     raw: &[u8],
     machine: &Machine,
-    enrolled: &[String],
     incident: IncidentId,
 ) -> Result<Decision, Fault> {
     let raw = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
-    let v: Value = serde_json::from_slice(raw).map_err(|_| Fault)?;
+    let v = json::from_slice(raw).map_err(|_| Fault)?;
     if v.get("hook_event_name").and_then(Value::as_str) != Some(kind.name()) {
         return Err(Fault);
     }
@@ -216,20 +191,20 @@ pub fn decide_with(
         .and_then(Value::as_str)
         .and_then(|s| ConvId::parse(s.as_bytes()))
         .ok_or(Fault)?;
-    let cwd = v.get("cwd").and_then(Value::as_str).ok_or(Fault)?;
     let tool = v.get("tool_name").and_then(Value::as_str).unwrap_or("");
     let subagent = v.get("agent_id").is_some();
 
     let _lock = machine.lock().map_err(|_| Fault)?;
     let (mut st, mut dirty) = machine.read_conv(&conv, incident);
 
-    // The conservative "a person typed it" rule (M13).
+    // A prompt starts a turn. The conservative "a person typed it" rule (M13).
     let mut person_typed = true;
     match kind {
         HookKind::UserPromptSubmit => {
             person_typed = !st.sub_since_prompt;
-            if st.sub_since_prompt {
+            if st.sub_since_prompt || st.withheld != 0 {
                 st.sub_since_prompt = false;
+                st.withheld = 0;
                 dirty = true;
             }
         }
@@ -259,20 +234,27 @@ pub fn decide_with(
 
     // The pre-filter on this hook's text.
     let ctx = ScanCtx {
-        enforce: enforced(cwd, enrolled),
         person_typed,
         can_replace: kind == HookKind::PostToolUse && tool == "Bash",
         passed_model: matches!(tool, "WebFetch" | "WebSearch" | "Task" | "Agent"),
+        input_strikes: st.strikes,
     };
-    if let Some(text) = scan_text(kind, &v)? {
+    if let Some(text) = scan_text(kind, &v) {
         let verdict = detect::detect(&text);
         for h in verdict.hits.iter().flatten() {
             match hook::on_hit(kind, h.rule, &ctx, incident) {
-                Some((decision, event)) => {
-                    let (next, _) = phi::phi_step(st.phi, event);
-                    st.phi = next;
+                Some(out) => {
+                    if let Some(ev) = out.event {
+                        st.phi = phi::phi_step(st.phi, ev).0;
+                    }
+                    if out.strike {
+                        st.strikes = st.strikes.saturating_add(1);
+                    }
+                    if out.withheld {
+                        st.withheld = st.withheld.saturating_add(1);
+                    }
                     machine.write_conv(&conv, &st).map_err(|_| Fault)?;
-                    return Ok(decision);
+                    return Ok(out.decision);
                 }
                 None => machine.count(kind, h.rule),
             }
@@ -287,38 +269,86 @@ pub fn decide_with(
     if dirty {
         machine.write_conv(&conv, &st).map_err(|_| Fault)?;
     }
-    Ok(Decision::Pass)
+    Ok(hook::turn_gate(kind, st.withheld).unwrap_or(Decision::Pass))
+}
+
+/// `{"hookSpecificOutput": {"hookEventName": <event>, ...rest}}` plus `top`.
+fn specific<const N: usize>(
+    event: HookKind,
+    rest: [(&str, Value); N],
+    top: Vec<(String, Value)>,
+) -> Value {
+    let mut inner = vec![("hookEventName".to_string(), Value::str(event.name()))];
+    inner.extend(rest.into_iter().map(|(k, v)| (k.to_string(), v)));
+    let mut outer = top;
+    outer.push(("hookSpecificOutput".to_string(), Value::Object(inner)));
+    Value::Object(outer)
+}
+
+/// `continue: false`, Claude Code's universal stop.
+fn stop(m: &Msg) -> Vec<(String, Value)> {
+    vec![
+        ("continue".to_string(), Value::Bool(false)),
+        ("stopReason".to_string(), Value::str(&hook::text(m))),
+    ]
 }
 
 /// The harness's JSON for a decision; `None` for a pass.
 pub fn render(d: Decision) -> Option<Value> {
+    let block = |m: &Msg| {
+        vec![
+            ("decision".to_string(), Value::str("block")),
+            ("reason".to_string(), Value::str(&hook::text(m))),
+        ]
+    };
+    let deny = |m: &Msg, top| {
+        specific(
+            HookKind::PreToolUse,
+            [
+                ("permissionDecision", Value::str("deny")),
+                ("permissionDecisionReason", Value::str(&hook::text(m))),
+            ],
+            top,
+        )
+    };
     let v = match d {
         Decision::Pass => return None,
-        Decision::Inject(m) => json!({
-            "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": hook::text(&m)}
-        }),
-        Decision::BlockPrompt(m) => json!({
-            "decision": "block",
-            "reason": hook::text(&m),
-            "hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "suppressOriginalPrompt": true}
-        }),
-        Decision::BlockExpansion(m) | Decision::BlockCompaction(m) | Decision::StopLoop(m) => {
-            json!({"decision": "block", "reason": hook::text(&m)})
+        Decision::Inject(m) => specific(
+            HookKind::SessionStart,
+            [("additionalContext", Value::str(&hook::text(&m)))],
+            vec![],
+        ),
+        Decision::BlockPrompt {
+            msg,
+            suppress: true,
+        } => specific(
+            HookKind::UserPromptSubmit,
+            [("suppressOriginalPrompt", Value::Bool(true))],
+            block(&msg),
+        ),
+        Decision::BlockPrompt {
+            msg: m,
+            suppress: false,
         }
-        Decision::Deny(m) => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": hook::text(&m)
-            }
-        }),
-        Decision::ReplaceBash(m) => json!({
-            "hookSpecificOutput": {
-                "hookEventName": "PostToolUse",
-                "updatedToolOutput": {"stdout": hook::text(&m), "stderr": "", "interrupted": false, "isImage": false}
-            }
-        }),
-        Decision::Halt(m) => json!({"continue": false, "stopReason": hook::text(&m)}),
+        | Decision::BlockExpansion(m)
+        | Decision::BlockCompaction(m)
+        | Decision::StopLoop(m) => Value::Object(block(&m)),
+        Decision::Deny(m) => deny(&m, vec![]),
+        Decision::DenyAndStop(m) => deny(&m, stop(&m)),
+        Decision::ReplaceBash(m) => specific(
+            HookKind::PostToolUse,
+            [(
+                "updatedToolOutput",
+                Value::object([
+                    ("stdout", Value::str(&hook::text(&m))),
+                    ("stderr", Value::str("")),
+                    ("interrupted", Value::Bool(false)),
+                    ("isImage", Value::Bool(false)),
+                ]),
+            )],
+            vec![],
+        ),
+        Decision::Halt(m) => Value::Object(stop(&m)),
     };
     Some(v)
 }
@@ -329,147 +359,195 @@ fn emit(d: Decision) -> ExitCode {
     let Some(v) = render(d) else {
         return ExitCode::SUCCESS;
     };
-    let Ok(bytes) = serde_json::to_vec(&v) else {
-        return ExitCode::from(STOPPED);
-    };
     let mut out = std::io::stdout().lock();
-    match out.write_all(&bytes).and_then(|()| out.flush()) {
+    match out
+        .write_all(json::to_string(&v).as_bytes())
+        .and_then(|()| out.flush())
+    {
         Ok(()) => ExitCode::SUCCESS,
         Err(_) => ExitCode::from(STOPPED),
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::state::Machine;
 
     // Split across literals so the repo's own scan never sees it whole.
     const SSN: &str = concat!("987-12", "-3456");
+    const CONV: &str = "00893aaf-19fa-41d2-8238-13269b9b3ca0";
 
     fn inc(s: &[u8]) -> IncidentId {
         IncidentId::parse(s).expect("an incident id")
     }
 
-    fn machine(name: &str) -> (Machine, std::path::PathBuf) {
+    fn machine(name: &str) -> (Machine, PathBuf) {
         let dir = std::env::temp_dir().join(format!("heddle-test-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a test state folder");
         (
-            Machine::at(dir.clone()).expect("a test machine folder"),
+            Machine::open(dir.clone()).expect("a test state folder"),
             dir,
         )
     }
 
-    fn payload(event: &str, extra: Value) -> Vec<u8> {
-        let mut v = json!({
-            "session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca0",
-            "transcript_path": "/tmp/t.jsonl",
-            "cwd": "/work/repo",
-            "hook_event_name": event,
-        });
-        for (k, x) in extra.as_object().expect("an object") {
-            v[k] = x.clone();
-        }
-        serde_json::to_vec(&v).expect("json")
+    /// A payload: the common fields, then `extra` (a JSON object's members).
+    fn payload(event: &str, extra: &str) -> Vec<u8> {
+        let sep = if extra.is_empty() { "" } else { "," };
+        format!(r#"{{"session_id":"{CONV}","transcript_path":"/tmp/t.jsonl","cwd":"/work/repo","hook_event_name":"{event}"{sep}{extra}}}"#)
+            .into_bytes()
     }
 
-    fn enrolled() -> Vec<String> {
-        vec!["/work/repo".to_string()]
+    fn bash(event: &str, command: &str) -> Vec<u8> {
+        payload(
+            event,
+            &format!(r#""tool_name":"Bash","tool_input":{{"command":"{command}"}}"#),
+        )
+    }
+
+    fn bash_result(stdout: &str) -> Vec<u8> {
+        payload(
+            "PostToolUse",
+            &format!(r#""tool_name":"Bash","tool_response":{{"stdout":"{stdout}","stderr":""}}"#),
+        )
+    }
+
+    fn decide(kind: HookKind, raw: &[u8], m: &Machine, i: &[u8]) -> Decision {
+        decide_with(kind, raw, m, inc(i)).expect("decides")
     }
 
     #[test]
-    fn a_tool_input_hit_denies_and_then_every_hook_is_braked() {
+    fn decision_3_the_first_tool_input_is_denied_with_the_hint_and_the_second_pauses() {
         let (m, dir) = machine("tool-input");
-        let i = inc(b"inc-aaaaaa");
-        let hit = payload(
-            "PreToolUse",
-            json!({"tool_name": "Bash", "tool_input": {"command": format!("echo id {SSN}")}}),
+        let hit = bash("PreToolUse", &format!("echo id {SSN}"));
+        let d = decide(HookKind::PreToolUse, &hit, &m, b"inc-aaaaaa");
+        assert!(matches!(d, Decision::Deny(Msg::InputHint(_))), "{d:?}");
+        // A strike is not a pause: a clean call goes ahead.
+        assert_eq!(
+            decide(
+                HookKind::PreToolUse,
+                &bash("PreToolUse", "ls"),
+                &m,
+                b"inc-bbbbbb"
+            ),
+            Decision::Pass
         );
-        let d = decide_with(HookKind::PreToolUse, &hit, &m, &enrolled(), i).expect("decides");
-        assert_eq!(d, Decision::Deny(Msg::Braked(i)));
-        // The same conversation is now braked, in any folder, enrolled or not.
-        let clean = payload(
-            "PreToolUse",
-            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}, "cwd": "/elsewhere"}),
+        let d = decide(HookKind::PreToolUse, &hit, &m, b"inc-cccccc");
+        assert!(
+            matches!(d, Decision::DenyAndStop(Msg::Paused(_, i)) if i == inc(b"inc-cccccc")),
+            "{d:?}"
         );
-        let d = decide_with(HookKind::PreToolUse, &clean, &m, &[], inc(b"inc-bbbbbb"))
-            .expect("decides");
-        assert_eq!(d, Decision::Deny(Msg::Braked(i)));
-        let prompt = payload("UserPromptSubmit", json!({"prompt": "hello"}));
-        let d = decide_with(
-            HookKind::UserPromptSubmit,
-            &prompt,
+        // Now every line is stopped, in any folder.
+        let d = decide(
+            HookKind::PreToolUse,
+            &bash("PreToolUse", "ls"),
             &m,
-            &[],
-            inc(b"inc-cccccc"),
-        )
-        .expect("decides");
-        assert_eq!(d, Decision::BlockPrompt(Msg::Braked(i)));
+            b"inc-dddddd",
+        );
+        assert_eq!(
+            d,
+            Decision::DenyAndStop(Msg::StillPaused(inc(b"inc-cccccc")))
+        );
+        let d = decide(
+            HookKind::UserPromptSubmit,
+            &payload("UserPromptSubmit", r#""prompt":"hello""#),
+            &m,
+            b"inc-eeeeee",
+        );
+        assert_eq!(
+            d,
+            Decision::BlockPrompt {
+                msg: Msg::StillPaused(inc(b"inc-cccccc")),
+                suppress: false
+            }
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
     fn a_typed_prompt_hit_is_held_and_a_clean_rewrite_releases_it() {
         let (m, dir) = machine("held");
-        let i = inc(b"inc-aaaaaa");
-        let hit = payload("UserPromptSubmit", json!({"prompt": format!("ssn {SSN}")}));
-        let d = decide_with(HookKind::UserPromptSubmit, &hit, &m, &enrolled(), i).expect("decides");
-        assert!(matches!(d, Decision::BlockPrompt(Msg::PromptHeld(_))));
-        let exp = payload("UserPromptExpansion", json!({}));
-        let d =
-            decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
-        assert_eq!(d, Decision::BlockExpansion(Msg::Held));
+        let hit = payload("UserPromptSubmit", &format!(r#""prompt":"ssn {SSN}""#));
+        let d = decide(HookKind::UserPromptSubmit, &hit, &m, b"inc-aaaaaa");
+        assert!(
+            matches!(
+                d,
+                Decision::BlockPrompt {
+                    msg: Msg::Held(_),
+                    suppress: true
+                }
+            ),
+            "{d:?}"
+        );
+        let exp = payload("UserPromptExpansion", "");
+        assert_eq!(
+            decide(HookKind::UserPromptExpansion, &exp, &m, b"inc-aaaaaa"),
+            Decision::BlockExpansion(Msg::HeldWaiting)
+        );
         let rewrite = payload(
             "UserPromptSubmit",
-            json!({"prompt": "the same question, without the number"}),
+            r#""prompt":"the same question, without the number""#,
         );
-        let d =
-            decide_with(HookKind::UserPromptSubmit, &rewrite, &m, &enrolled(), i).expect("decides");
-        assert_eq!(d, Decision::Pass);
-        let d =
-            decide_with(HookKind::UserPromptExpansion, &exp, &m, &enrolled(), i).expect("decides");
-        assert_eq!(d, Decision::Pass);
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &rewrite, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
+        assert_eq!(
+            decide(HookKind::UserPromptExpansion, &exp, &m, b"inc-aaaaaa"),
+            Decision::Pass
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn outside_an_enrolled_repo_rule_hits_only_count() {
-        let (m, dir) = machine("shadow");
-        let hit = payload(
-            "PreToolUse",
-            json!({"tool_name": "Bash", "tool_input": {"command": format!("echo {SSN}")}}),
-        );
-        let d =
-            decide_with(HookKind::PreToolUse, &hit, &m, &[], inc(b"inc-aaaaaa")).expect("decides");
-        assert_eq!(d, Decision::Pass);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    #[test]
-    fn a_bash_result_is_replaced_and_a_read_result_halts() {
+    fn decision_3_bash_results_are_withheld_and_the_third_in_a_turn_stops_it() {
         let (m, dir) = machine("results");
-        let i = inc(b"inc-aaaaaa");
-        let bash = payload(
-            "PostToolUse",
-            json!({"tool_name": "Bash", "tool_response": {"stdout": format!("ssn {SSN}"), "stderr": ""}}),
+        let hit = bash_result(&format!("ssn {SSN}"));
+        let batch = payload("PostToolBatch", r#""tool_calls":[]"#);
+        for n in 1..=3 {
+            let d = decide(HookKind::PostToolUse, &hit, &m, b"inc-aaaaaa");
+            assert!(
+                matches!(d, Decision::ReplaceBash(Msg::Withheld(_))),
+                "{n}: {d:?}"
+            );
+            let d = decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa");
+            assert_eq!(
+                d == Decision::StopLoop(Msg::TurnStopped),
+                n == 3,
+                "{n}: {d:?}"
+            );
+        }
+        // The next prompt starts a new turn, and nothing was paused.
+        let prompt = payload("UserPromptSubmit", r#""prompt":"go on""#);
+        assert_eq!(
+            decide(HookKind::UserPromptSubmit, &prompt, &m, b"inc-aaaaaa"),
+            Decision::Pass
         );
-        let d = decide_with(HookKind::PostToolUse, &bash, &m, &enrolled(), i).expect("decides");
-        assert!(matches!(
-            d,
-            Decision::ReplaceBash(Msg::ResultWithheld(_, _))
-        ));
-        let other = payload(
-            "PostToolUse",
-            json!({"session_id": "00893aaf-19fa-41d2-8238-13269b9b3ca1", "tool_name": "Read", "tool_response": {"file": {"content": format!("ssn {SSN}")}}}),
+        assert_eq!(
+            decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa"),
+            Decision::Pass
         );
-        let d = decide_with(HookKind::PostToolUse, &other, &m, &enrolled(), i).expect("decides");
-        assert!(matches!(d, Decision::Halt(Msg::ResultWithheld(_, _))));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_read_result_or_a_hit_in_the_batch_pauses_the_conversation() {
+        let (m, dir) = machine("read");
+        let read = payload(
+            "PostToolUse",
+            &format!(r#""tool_name":"Read","tool_response":{{"file":{{"content":"ssn {SSN}"}}}}"#),
+        );
+        let d = decide(HookKind::PostToolUse, &read, &m, b"inc-aaaaaa");
+        assert!(matches!(d, Decision::Halt(Msg::Paused(..))), "{d:?}");
+        let _ = std::fs::remove_dir_all(dir);
+        let (m, dir) = machine("batch");
+        let batch = payload(
+            "PostToolBatch",
+            &format!(r#""tool_calls":[{{"tool_name":"Bash","tool_response":"ssn {SSN}"}}]"#),
+        );
+        let d = decide(HookKind::PostToolBatch, &batch, &m, b"inc-aaaaaa");
+        assert!(matches!(d, Decision::StopLoop(Msg::Paused(..))), "{d:?}");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -477,53 +555,100 @@ mod tests {
     fn h1e_bad_input_is_a_fault() {
         let (m, dir) = machine("faults");
         let i = inc(b"inc-aaaaaa");
-        assert!(decide_with(HookKind::PreToolUse, b"not json", &m, &[], i).is_err());
-        let wrong_event = payload("PostToolUse", json!({}));
-        assert!(decide_with(HookKind::PreToolUse, &wrong_event, &m, &[], i).is_err());
+        assert!(decide_with(HookKind::PreToolUse, b"not json", &m, i).is_err());
+        assert!(decide_with(HookKind::PreToolUse, &payload("PostToolUse", ""), &m, i).is_err());
         let no_session = br#"{"hook_event_name":"PreToolUse","cwd":"/x"}"#;
-        assert!(decide_with(HookKind::PreToolUse, no_session, &m, &[], i).is_err());
+        assert!(decide_with(HookKind::PreToolUse, no_session, &m, i).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
-    fn v5_an_unreadable_label_file_is_read_as_braked() {
+    fn v5_an_unreadable_label_file_is_read_as_paused() {
         let (m, dir) = machine("unreadable");
-        let conv = ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca0").expect("conv");
+        let conv = ConvId::parse(CONV.as_bytes()).expect("conv");
         std::fs::write(m.conv_path(&conv), b"fabric-conv 9\nphi clean\nsub 0\n").expect("write");
-        let clean = payload(
-            "PreToolUse",
-            json!({"tool_name": "Bash", "tool_input": {"command": "ls"}}),
+        let d = decide(
+            HookKind::PreToolUse,
+            &bash("PreToolUse", "ls"),
+            &m,
+            b"inc-dddddd",
         );
-        let i = inc(b"inc-dddddd");
-        let d = decide_with(HookKind::PreToolUse, &clean, &m, &[], i).expect("decides");
-        assert_eq!(d, Decision::Deny(Msg::Braked(i)));
+        assert_eq!(
+            d,
+            Decision::DenyAndStop(Msg::StillPaused(inc(b"inc-dddddd")))
+        );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_arguments_are_both_flags_once_and_absolute() {
+        let a = |s: &[&str]| state_arg(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
+        assert_eq!(
+            a(&["--root", "/r", "--state", "/s"]),
+            Some(PathBuf::from("/s"))
+        );
+        assert_eq!(
+            a(&["--state", "/s", "--root", "/r"]),
+            Some(PathBuf::from("/s"))
+        );
+        for bad in [
+            &["--state", "/s"][..],
+            &["--root", "/r"],
+            &["--root", "/r", "--state", "s"],
+            &["--root", "r", "--state", "/s"],
+            &["--root", "/r", "--state", "/s", "--state", "/t"],
+            &["--root", "/r", "--state"],
+            &["--root", "/r", "--other", "/s"],
+            &[],
+        ] {
+            assert_eq!(a(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
     fn the_rendered_json_has_the_shapes_claude_code_reads() {
         let i = inc(b"inc-aaaaaa");
+        let r = |d| json::to_string(&render(d).expect("json"));
         assert_eq!(render(Decision::Pass), None);
-        let deny = render(Decision::Deny(Msg::Braked(i))).expect("json");
-        assert_eq!(deny["hookSpecificOutput"]["permissionDecision"], "deny");
-        let block = render(Decision::BlockPrompt(Msg::Fault)).expect("json");
-        assert_eq!(block["decision"], "block");
-        assert_eq!(block["hookSpecificOutput"]["suppressOriginalPrompt"], true);
-        let replace = render(Decision::ReplaceBash(Msg::Fault)).expect("json");
+        let deny = render(Decision::Deny(Msg::Hiccup)).expect("json");
+        let inner = deny.get("hookSpecificOutput").expect("inner");
         assert_eq!(
-            replace["hookSpecificOutput"]["updatedToolOutput"]["isImage"],
-            false
+            inner.get("permissionDecision").and_then(Value::as_str),
+            Some("deny")
         );
-        let halt = render(Decision::Halt(Msg::Fault)).expect("json");
-        assert_eq!(halt["continue"], false);
-    }
-
-    #[test]
-    fn enforcement_follows_the_enrolled_roots_on_path_boundaries() {
-        let roots = vec!["/work/repo".to_string()];
-        assert!(enforced("/work/repo", &roots));
-        assert!(enforced("/work/repo/src", &roots));
-        assert!(!enforced("/work/repo-other", &roots));
-        assert!(!enforced("/work", &roots));
+        assert_eq!(
+            inner.get("hookEventName").and_then(Value::as_str),
+            Some("PreToolUse")
+        );
+        assert_eq!(deny.get("continue"), None);
+        let stop = render(Decision::DenyAndStop(Msg::StillPaused(i))).expect("json");
+        assert_eq!(stop.get("continue").and_then(Value::as_bool), Some(false));
+        assert!(
+            r(Decision::BlockPrompt {
+                msg: Msg::Held(phi::RuleId::R01),
+                suppress: true
+            })
+            .contains(r#""suppressOriginalPrompt":true"#)
+        );
+        let fault = r(Decision::BlockPrompt {
+            msg: Msg::Hiccup,
+            suppress: false,
+        });
+        assert!(
+            fault.starts_with(r#"{"decision":"block","reason":"#) && !fault.contains("suppress")
+        );
+        let replace = render(Decision::ReplaceBash(Msg::Hiccup)).expect("json");
+        let out = replace
+            .get("hookSpecificOutput")
+            .and_then(|o| o.get("updatedToolOutput"))
+            .expect("output");
+        assert_eq!(out.get("isImage").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            r(Decision::Halt(Msg::Sealed)),
+            format!(
+                r#"{{"continue":false,"stopReason":"{}"}}"#,
+                hook::text(&Msg::Sealed)
+            )
+        );
     }
 }
