@@ -168,5 +168,6 @@ Three facts about Claude Code 2.1.321 that these runs settle:
 | **the live check** | An agent ran `heddle doctor --canary`. heddle's PreToolUse hook recognised it and failed on purpose; **Claude Code refused the call** ("a PreToolUse hook failed … onFailure"), so the canary never ran. doctor then reported "Claude called heddle, and a deliberately broken check was blocked", exit 0 |
 | **hook line 9** | A script (deny rules do not cover scripts) stripped the PreToolUse line from the settings file mid-session. ConfigChange ran, heddle refused the change and left its trace, and **the next command was still hooked** (PreToolUse 2 of 2). `stream-json` does not report ConfigChange hook events, so the trace file is the evidence |
 | doctor, after the strip | "Wiring: BROKEN (a hook line is missing or changed)": the file on disk did change; only running sessions were protected. `setup` again restored it |
+| repair (no model needed) | With the installed binary deleted, the kept copy's `repair` checked itself against the receipt and put it back; doctor confirmed it. `repair` refuses to run from anything but the kept copy, and refuses a kept copy whose size or time changed |
 | uninstall | Took Fabric's entries out of the settings file (it was empty before setup, and is `{}` after), removed both binaries and the state folder |
 
