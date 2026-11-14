@@ -155,6 +155,31 @@ run_fork() {
   echo "done: fork (payloads in $d/log)"
 }
 
+# T11 and T5: a custom slash command, then /compact and /clear, sent in -p
+# mode on one conversation. Records the UserPromptExpansion, PreCompact and
+# SessionStart payloads, and whether /clear starts a new session id.
+run_t11() {
+  local d="$out/t11"
+  layout "$d"
+  local ev; local hooks='{}'
+  for ev in SessionStart UserPromptSubmit UserPromptExpansion PreCompact; do
+    hooks=$(jq -c --arg ev "$ev" --arg probe "$probe" '. + {($ev): [{hooks: [{type: "command", command: "/bin/sh", args: [$probe, $ev, "ok"], timeout: 10}]}]}' <<< "$hooks")
+  done
+  jq -n --argjson h "$hooks" '{hooks: $h}' > "$d/repo/.claude/settings.local.json"
+  local c; for c in "$d/repo" "$d/wt"; do
+    mkdir -p "$c/.claude/commands" && printf 'Reply with the single word expanded.\n' > "$c/.claude/commands/hello.md"
+  done
+  local id; id=$(uuidgen | tr 'A-Z' 'a-z')
+  local common=(--model "$model" --output-format stream-json --verbose --setting-sources project,local --tools "" --max-turns 2 --max-budget-usd 0.10)
+  ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "Reply with the word one." --session-id "$id" "${common[@]}" ) > "$d/1.jsonl" 2>&1 < /dev/null
+  local p n=2; for p in "/hello" "/compact" "/clear" "Reply with the word last."; do
+    ( cd "$d/wt" && "${cleanenv[@]}" PROBE_LOG="$d/log" "$claude_bin" -p "$p" --resume "$id" "${common[@]}" ) > "$d/$n.jsonl" 2>&1 < /dev/null
+    n=$((n + 1))
+  done
+  echo "$id" > "$d/first_session_id"
+  echo "done: t11 (payloads in $d/log)"
+}
+
 # want NAME [PREFIX...]: no prefixes means every case.
 want() {
   local name=$1; shift
@@ -170,3 +195,4 @@ echo "$cases" | while read -r name ev mode onfail to kind; do
   want "$name" "$@" && run_case "$name" "$ev" "$mode" "$onfail" "$to" "$kind"
 done
 want fork "$@" && run_fork
+want t11 "$@" && run_t11

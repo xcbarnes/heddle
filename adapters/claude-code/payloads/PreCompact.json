@@ -1,0 +1,9 @@
+{
+  "custom_instructions": null,
+  "cwd": "/tmp/day0/repo",
+  "hook_event_name": "PreCompact",
+  "prompt_id": "00000000-0000-4000-8000-000000000000",
+  "session_id": "00000000-0000-4000-8000-000000000000",
+  "transcript_path": "/Users/me/.claude/projects/-tmp-day0-repo/00000000-0000-4000-8000-000000000000.jsonl",
+  "trigger": "manual"
+}

@@ -645,6 +645,44 @@ mod tests {
     }
 
     #[test]
+    fn every_recorded_payload_passes_on_a_clean_conversation() {
+        macro_rules! recorded {
+            ($name:literal) => {
+                include_bytes!(concat!(
+                    "../../../adapters/claude-code/payloads/",
+                    $name,
+                    ".json"
+                ))
+                .as_slice()
+            };
+        }
+        let (m, dir) = machine("recorded");
+        for (kind, raw) in [
+            (HookKind::SessionStart, recorded!("SessionStart-startup")),
+            (HookKind::SessionStart, recorded!("SessionStart-resume")),
+            (HookKind::SessionStart, recorded!("SessionStart-fork")),
+            (HookKind::SessionStart, recorded!("SessionStart-compact")),
+            (HookKind::SessionStart, recorded!("SessionStart-clear")),
+            (HookKind::UserPromptSubmit, recorded!("UserPromptSubmit")),
+            (
+                HookKind::UserPromptExpansion,
+                recorded!("UserPromptExpansion"),
+            ),
+            (HookKind::PreToolUse, recorded!("PreToolUse")),
+            (HookKind::PostToolUse, recorded!("PostToolUse")),
+            (HookKind::PostToolBatch, recorded!("PostToolBatch")),
+            (HookKind::PreCompact, recorded!("PreCompact")),
+        ] {
+            assert_eq!(
+                decide_with(kind, raw, &m, inc(b"inc-aaaaaa")).ok(),
+                Some(Decision::Pass),
+                "{kind:?}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn h1e_bad_input_is_a_fault() {
         let (m, dir) = machine("faults");
         let i = inc(b"inc-aaaaaa");

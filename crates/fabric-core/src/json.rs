@@ -642,6 +642,10 @@ mod tests {
             include_str!("../../../adapters/claude-code/payloads/PostToolBatch.json"),
             include_str!("../../../adapters/claude-code/payloads/UserPromptSubmit.json"),
             include_str!("../../../adapters/claude-code/payloads/SessionStart-fork.json"),
+            include_str!("../../../adapters/claude-code/payloads/SessionStart-compact.json"),
+            include_str!("../../../adapters/claude-code/payloads/SessionStart-clear.json"),
+            include_str!("../../../adapters/claude-code/payloads/UserPromptExpansion.json"),
+            include_str!("../../../adapters/claude-code/payloads/PreCompact.json"),
         ] {
             let v = ok(p);
             assert!(v.get("session_id").and_then(Value::as_str).is_some());
