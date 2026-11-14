@@ -34,12 +34,36 @@ allow = [
   "itoa",
   "memchr",
   "zmij",
+  # fabric-core: SHA-256 (sha2 0.11.1) and Ed25519 (ed25519-dalek 3.0.0), and
+  # what they build. proc-macro2, quote, syn and unicode-ident build only on
+  # x86_64, for curve25519-dalek's vector backend.
+  "sha2",
+  "digest",
+  "block-buffer",
+  "crypto-common",
+  "hybrid-array",
+  "typenum",
+  "cpufeatures",
+  "libc",
+  "cfg-if",
+  "ed25519-dalek",
+  "ed25519",
+  "signature",
+  "curve25519-dalek",
+  "curve25519-dalek-derive",
+  "subtle",
+  "rustc_version",
+  "semver",
+  "proc-macro2",
+  "quote",
+  "syn",
+  "unicode-ident",
 ]
 
 [bans.build]
 # Each one runs code at build time, so each is named. zmij is serde_json's
 # float formatter; its build script was flagged by this check on 2026-11-13.
-allow-build-scripts = ["serde_json", "serde_core", "zmij"]
+allow-build-scripts = ["serde_json", "serde_core", "zmij", "curve25519-dalek", "libc", "proc-macro2", "quote"]
 executables = "deny"
 include-dependencies = true
 
