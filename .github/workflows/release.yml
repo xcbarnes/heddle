@@ -1,10 +1,12 @@
 name: release
 
-# The only place an installable heddle is built (v01_architecture.md §5.10).
-# A tag v<version> builds the binary from the tagged commit with the locked
-# dependencies, attests the build, and publishes it with its SHA-256. Nothing
-# here installs anything: the admin user verifies the attestation and the hash
-# with `heddle-admin release-record`, and a person runs `sudo heddle setup`.
+# The only place an installable heddle is built. A tag v<crate version>
+# (v0.1.0, or a release candidate such as v0.1.0-rc.1) builds both Mac
+# binaries from the tagged commit, attests them, and publishes them. It
+# refuses a tag whose commit is not on main with a green ci run. Nothing here
+# installs anything: a person's agent downloads one named version, checks it
+# with `gh attestation verify` pinned to this workflow, the tag and the
+# commit, and runs that binary's `heddle setup`.
 
 on:
   push:
@@ -21,22 +23,43 @@ jobs:
       contents: write
       id-token: write
       attestations: write
+      actions: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: The pinned toolchain
-        run: rustup toolchain install
+          fetch-depth: 0
+      - name: The tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+      - name: ci passed on this commit, on main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&status=success" --jq .total_count)
+          test "$n" -ge 1 || { echo "no green ci run on main for $GITHUB_SHA"; exit 1; }
+      - name: The pinned toolchain, and the Intel target
+        run: rustup toolchain install && rustup target add x86_64-apple-darwin
       - name: The tag names the crate's version
         run: test "v$(cargo pkgid -p heddle | sed 's/.*[#@]//')" = "$GITHUB_REF_NAME"
-      - name: Build with the locked dependencies
-        run: cargo build --release --locked -p heddle
-      - name: Name the binary and record its SHA-256
-        run: cp target/release/heddle heddle-aarch64-apple-darwin && shasum -a 256 heddle-aarch64-apple-darwin > SHA256SUMS && cat SHA256SUMS
+      - name: Build both Mac binaries with the locked lockfile
+        env:
+          HEDDLE_COMMIT: ${{ github.sha }}
+        run: |
+          for t in aarch64-apple-darwin x86_64-apple-darwin; do
+            cargo build --release --locked -p heddle --target "$t"
+            cp "target/$t/release/heddle" "heddle-$t"
+          done
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
-          subject-path: heddle-aarch64-apple-darwin
+          subject-path: |
+            heddle-aarch64-apple-darwin
+            heddle-x86_64-apple-darwin
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" heddle-aarch64-apple-darwin SHA256SUMS --verify-tag --prerelease --title "$GITHUB_REF_NAME" --notes "Built by CI from $GITHUB_SHA. Install only through heddle-admin release-record, then sudo heddle setup."
+        run: |
+          pre=""
+          case "$GITHUB_REF_NAME" in *-*) pre="--prerelease" ;; esac
+          gh release create "$GITHUB_REF_NAME" heddle-aarch64-apple-darwin heddle-x86_64-apple-darwin \
+            --verify-tag $pre --title "$GITHUB_REF_NAME" \
+            --notes "Built by GitHub Actions from commit $GITHUB_SHA, which passed ci on main. Check a binary before installing it: gh attestation verify --repo $GITHUB_REPOSITORY --source-ref refs/tags/$GITHUB_REF_NAME --source-digest $GITHUB_SHA --signer-workflow $GITHUB_REPOSITORY/.github/workflows/release.yml --deny-self-hosted-runners <binary>"
