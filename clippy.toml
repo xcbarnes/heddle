@@ -19,4 +19,13 @@ disallowed-methods = [
 disallowed-types = [
   { path = "std::collections::HashMap", reason = "iteration order is not fixed; use BTreeMap" },
   { path = "std::collections::HashSet", reason = "iteration order is not fixed; use BTreeSet" },
+  # heddle opens no sockets, and starts programs only from one edge module that
+  # allows this lint by name and lists every program in a test.
+  { path = "std::process::Command", reason = "process calls live in the one edge module" },
+  { path = "std::net::TcpStream", reason = "heddle opens no sockets" },
+  { path = "std::net::TcpListener", reason = "heddle opens no sockets" },
+  { path = "std::net::UdpSocket", reason = "heddle opens no sockets" },
+  { path = "std::os::unix::net::UnixStream", reason = "heddle opens no sockets" },
+  { path = "std::os::unix::net::UnixListener", reason = "heddle opens no sockets" },
+  { path = "std::os::unix::net::UnixDatagram", reason = "heddle opens no sockets" },
 ]

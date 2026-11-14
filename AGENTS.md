@@ -18,7 +18,9 @@ Read this before changing anything. `CLAUDE.md` points here.
 
 ## Dependencies
 
-`deny.toml` is the allow-list. The core may use `sha2` and `ed25519-dalek` (verify only). Elsewhere: `serde`, `serde_json`, `getrandom` and one monotonic-clock wrapper. `regex` and `proptest` are dev-only. No git library, argument parser, async runtime or TLS stack: heddle calls `/usr/bin/curl` and `git`. No crate version younger than seven days.
+None. `Cargo.lock` lists only this workspace's packages, and CI fails otherwise. The standard library does the work, with our own JSON reader (`crates/fabric-core/src/json.rs`, checked against Python's `json` by `spec/jsondiff/run.sh`) and hand-parsed arguments.
+
+heddle opens no sockets and runs no program from a hook. clippy refuses `std::net` and `std::process::Command`: a process call goes in one edge module that allows the lint by name, starts each program by absolute path, and has a test listing them all.
 
 ## Checks
 
@@ -26,8 +28,9 @@ Read this before changing anything. `CLAUDE.md` points here.
 cargo fmt --all
 cargo clippy --workspace --all-targets --frozen -- -D warnings
 cargo test --workspace --frozen
+spec/jsondiff/run.sh
 ```
 
-**Local builds are offline (decision D36).** Crate sources come from CI's `vendor` job, never from a local fetch. Once per lockfile change, download the newest `vendor-sources` artifact from a run on `main` and unpack it at the repo root (`tar xzf vendor.tgz`). Then point cargo at it with a local `.cargo/config.toml`: `source.crates-io.replace-with = "vendored-sources"`, `source.vendored-sources.directory = "vendor"`, `net.offline = true`. Both `vendor/` and `.cargo/` are gitignored. Cargo checks every vendored file against `Cargo.lock`. A local binary is for tests only: anything installed comes from a CI release that the admin user verifies.
+With nothing to fetch, builds need no network. A local binary is for tests only: anything installed comes from an attested CI release. Test launches of `claude` live in `day0/` scripts, never in `cargo test`.
 
-CI runs those, a WebAssembly build of the core, `cargo deny`, `cargo audit`, a crate count and Betterleaks over every commit.
+CI runs those, a WebAssembly build of the core and the lockfile check. GitHub's secret scanning and push protection cover every push.

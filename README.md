@@ -20,9 +20,11 @@ Fabric has two planes. The *lasting* plane is git and markdown: task files and r
 | `crates/fabric-core` | the pure core: types, grammars, every state machine, `render`, `detect`, `flow` |
 | `day0/` | the day-0 hook tests against the pinned Claude Code, and [their results](day0/RESULTS.md) |
 | `adapters/claude-code/` | recorded hook payloads, for the decoder tests |
-| `.github/workflows/ci.yml` | lints, tests, the supply-chain checks and the secret scan |
+| `crates/heddle` | the command-line tool; today, the PHI hook path |
+| `spec/` | the Quint model of the room, the detector's rules, and the JSON differential test |
+| `.github/workflows/ci.yml` | lints, tests, the WebAssembly build, the JSON differential test and the no-third-party-crates check |
 
-Still to come in v0.1: `fabric-wire` (the room's hand-written decoder), `heddle`, `heddle-guard`, `heddle-admin`, the room's TypeScript shell, `spec/` and the Quint model.
+Still to come in v0.1: `setup`, `doctor`, `repair`, `uninstall`, the local room, and the agent verbs.
 
 ## Building
 
@@ -31,11 +33,12 @@ Rust is pinned in `rust-toolchain.toml` (1.99.1). Binaries that get installed co
 ```bash
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+spec/jsondiff/run.sh
 ```
 
 ## Rules for this repo
 
 - No secrets, tokens or patient data, ever, in code, tests, fixtures, commits or issues. Test data is invented, and uses the reserved synthetic forms (`SYN-` ids, Social Security numbers in area 000 or 666).
-- The crate policy in `deny.toml` is in force: a dependency is added to its allow-list in the same commit, with a reason.
+- No third-party crates. CI fails if `Cargo.lock` lists any package that is not this workspace's own.
 
 Licensed under Apache-2.0.

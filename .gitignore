@@ -5,7 +5,3 @@
 /room/node_modules
 /room/.wrangler
 .DS_Store
-# Local offline builds (D36): sources vendored by CI, and the cargo config
-# that points at them. Neither is committed.
-/vendor
-/.cargo/
