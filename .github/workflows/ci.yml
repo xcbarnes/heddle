@@ -70,7 +70,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - run: rustup toolchain install && cargo vendor --locked --versioned-dirs vendor > /dev/null && tar czf vendor.tgz vendor
+      # Not --locked: after a dependency change this also hands back the new
+      # Cargo.lock, which the supply-chain job then checks once it is committed.
+      - run: rustup toolchain install && cargo vendor --versioned-dirs vendor > /dev/null && tar czf vendor.tgz vendor Cargo.lock
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: vendor-sources
