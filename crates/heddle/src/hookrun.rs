@@ -206,19 +206,24 @@ fn last_message_id(path: &str) -> Option<String> {
     ConvId::parse(id.as_bytes()).map(|_| id.to_string())
 }
 
-/// `heddle doctor --canary` run as a Bash call: the live check.
-fn is_canary(v: &Value) -> bool {
+/// A Bash call that runs heddle with exactly `words`, by any path.
+fn heddle_verb(v: &Value, words: &[&str]) -> bool {
     let command = v
         .get("tool_input")
         .and_then(|i| i.get("command"))
         .and_then(Value::as_str);
     v.get("tool_name").and_then(Value::as_str) == Some("Bash")
-        && command.is_some_and(
-            |c| match c.split_whitespace().collect::<Vec<_>>().as_slice() {
-                [prog, "doctor", "--canary"] => prog.trim_matches(['"', '\'']).ends_with("heddle"),
-                _ => false,
-            },
-        )
+        && command.is_some_and(|c| {
+            let mut w = c.split_whitespace();
+            w.next()
+                .is_some_and(|prog| prog.trim_matches(['"', '\'']).ends_with("heddle"))
+                && w.eq(words.iter().copied())
+        })
+}
+
+/// `heddle doctor --canary` run as a Bash call: the live check.
+fn is_canary(v: &Value) -> bool {
+    heddle_verb(v, &["doctor", "--canary"])
 }
 
 /// Hook line 9 (T6, T15): a change to the main checkout's local settings
@@ -565,6 +570,16 @@ pub fn decide_with(
             machine.write_conv(&conv, &st).map_err(|_| Fault)?;
         }
         return Ok(d);
+    }
+
+    // `heddle phi flag` run as a Bash call: a raise marker. It pauses this
+    // conversation on purpose (a person who suspects something, or a test of
+    // the exits); the call itself never runs.
+    if kind == HookKind::PreToolUse && heddle_verb(&v, &["phi", "flag"]) {
+        st.phi = phi::phi_step(st.phi, PhiEvent::Flag { incident }).0;
+        note_pause(machine, &conv, transcript);
+        machine.write_conv(&conv, &st).map_err(|_| Fault)?;
+        return Ok(Decision::DenyAndStop(Msg::Flagged(incident)));
     }
 
     // The seatbelts: a command that would switch the brake off by accident.
@@ -1650,6 +1665,37 @@ mod tests {
             assert_eq!(d == Decision::Pass, rewound, "{d:?}");
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn heddle_phi_flag_pauses_the_conversation_that_runs_it() {
+        let (m, dir) = machine("flag");
+        let flag = bash("PreToolUse", "/Users/me/.local/bin/heddle phi flag");
+        assert_eq!(
+            decide(HookKind::PreToolUse, &flag, &m, b"inc-aaaaaa"),
+            Decision::DenyAndStop(Msg::Flagged(inc(b"inc-aaaaaa")))
+        );
+        let next = payload("UserPromptSubmit", r#""prompt":"hello""#);
+        assert!(matches!(
+            decide(HookKind::UserPromptSubmit, &next, &m, b"inc-bbbbbb"),
+            Decision::BlockPrompt { .. }
+        ));
+        // Only the exact verb counts.
+        let (m2, dir2) = machine("flag-not");
+        for c in ["echo heddle phi flag", "heddle phi flag now", "heddle phi"] {
+            assert_eq!(
+                decide(
+                    HookKind::PreToolUse,
+                    &bash("PreToolUse", c),
+                    &m2,
+                    b"inc-cccccc"
+                ),
+                Decision::Pass,
+                "{c}"
+            );
+        }
+        let _ = std::fs::remove_dir_all(dir);
+        let _ = std::fs::remove_dir_all(dir2);
     }
 
     #[test]

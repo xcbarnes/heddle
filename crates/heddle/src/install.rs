@@ -734,8 +734,14 @@ fn do_uninstall() -> Result<String, String> {
 /// lowers only when the transcript on disk shows the flagged turn off the
 /// live chain. An agent in another session may run it.
 pub fn phi(args: &[String]) -> ExitCode {
+    if matches!(args, [a] if a == "flag") {
+        return fail(
+            "heddle phi flag pauses the conversation that runs it, through its hook: ask Claude to run it \
+             as a Bash command in the project. Run here, it does nothing.",
+        );
+    }
     if !matches!(args, [a] if a == "recheck") {
-        return fail("usage: heddle phi recheck");
+        return fail("usage: heddle phi recheck | heddle phi flag");
     }
     let Ok(p) = Paths::new() else {
         return fail("HOME is not set to an absolute folder");

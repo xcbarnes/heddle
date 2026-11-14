@@ -80,6 +80,8 @@ pub enum Msg {
     Paused(RuleId, IncidentId),
     /// The conversation was paused earlier.
     StillPaused(IncidentId),
+    /// The conversation was paused on purpose, by `heddle phi flag`.
+    Flagged(IncidentId),
     /// The conversation is sealed.
     Sealed,
     /// A typed prompt is held: no expansion or compaction until it is rewritten.
@@ -248,6 +250,14 @@ pub fn text(m: &Msg) -> String {
              reference {}). {NOBODY} To carry on: start a new session. Or rewind: /rewind, pick the \
              message before this one, choose Restore conversation, then edit and send.",
             rule_name(*rule),
+            reference(inc)
+        ),
+        Msg::Flagged(inc) => write!(
+            s,
+            "Fabric paused this conversation, as asked (reference {}). To carry on: start a new \
+             session. Or rewind: /rewind, pick the message before this one, choose Restore \
+             conversation, then edit and send. If this comes back right after a rewind, send it \
+             once more.",
             reference(inc)
         ),
         Msg::StillPaused(inc) => write!(
