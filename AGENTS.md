@@ -24,8 +24,10 @@ Read this before changing anything. `CLAUDE.md` points here.
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --frozen -- -D warnings
+cargo test --workspace --frozen
 ```
+
+**Local builds are offline (decision D36).** Crate sources come from CI's `vendor` job, never from a local fetch. Once per lockfile change, download the newest `vendor-sources` artifact from a run on `main` and unpack it at the repo root (`tar xzf vendor.tgz`). Then point cargo at it with a local `.cargo/config.toml`: `source.crates-io.replace-with = "vendored-sources"`, `source.vendored-sources.directory = "vendor"`, `net.offline = true`. Both `vendor/` and `.cargo/` are gitignored. Cargo checks every vendored file against `Cargo.lock`. A local binary is for tests only: anything installed comes from a CI release that the admin user verifies.
 
 CI runs those, a WebAssembly build of the core, `cargo deny`, `cargo audit`, a crate count and Betterleaks over every commit.
