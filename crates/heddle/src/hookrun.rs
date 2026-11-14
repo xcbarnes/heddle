@@ -36,6 +36,7 @@ use fabric_core::json::{self, Value};
 use fabric_core::phi::{self, Brake, ConvPhi, Phi, PhiEvent, RuleId};
 
 use crate::state::Machine;
+use crate::wiring::Wiring;
 
 /// Shorter than the 10-second timeout setup gives every PHI line.
 const WATCHDOG: Duration = Duration::from_millis(8_000);
@@ -63,19 +64,24 @@ pub fn run(args: &[String]) -> ExitCode {
     let Some(kind) = kind else {
         return emit(Decision::Halt(Msg::Hiccup));
     };
-    let decision = match parse_line(args.get(2..).unwrap_or_default()) {
-        Some(line) if armed => {
-            std::panic::catch_unwind(|| decide(kind, &line)).unwrap_or_else(|_| line.fault(kind))
-        }
-        Some(line) => line.fault(kind),
-        None => hook::fault(kind),
+    let outcome = match parse_line(args.get(2..).unwrap_or_default()) {
+        Some(line) if armed => std::panic::catch_unwind(|| decide(kind, &line))
+            .unwrap_or_else(|_| Some(line.fault(kind))),
+        Some(line) => Some(line.fault(kind)),
+        None => Some(hook::fault(kind)),
     };
-    emit(decision)
+    match outcome {
+        Some(decision) => emit(decision),
+        // The live check's canary: fail on purpose, print nothing.
+        None => ExitCode::from(STOPPED),
+    }
 }
 
 /// What the hook line says after the event.
 #[derive(Debug, PartialEq, Eq)]
 struct Line {
+    /// The main checkout.
+    root: PathBuf,
     /// The state folder.
     state: PathBuf,
     /// `--mode count`: log every hit, decide nothing.
@@ -121,8 +127,8 @@ fn parse_line(rest: &[String]) -> Option<Line> {
     fn absolute(p: Option<&str>) -> Option<&Path> {
         p.map(Path::new).filter(|p| p.is_absolute())
     }
-    absolute(root)?;
     Some(Line {
+        root: absolute(root)?.to_path_buf(),
         state: absolute(state)?.to_path_buf(),
         count_only,
     })
@@ -141,19 +147,74 @@ fn arm_watchdog() -> bool {
         .is_ok()
 }
 
-fn decide(kind: HookKind, line: &Line) -> Decision {
+/// The decision for this run; `None` only for the live check's canary.
+fn decide(kind: HookKind, line: &Line) -> Option<Decision> {
     let Ok(machine) = Machine::open(line.state.clone()) else {
-        return line.fault(kind);
+        return Some(line.fault(kind));
     };
     let payload = read_payload(kind);
     if line.count_only {
         count_hits(kind, payload.ok().as_deref(), &machine);
-        return Decision::Pass;
+        return Some(Decision::Pass);
     }
     let (Ok(payload), Some(inc)) = (payload, fresh_incident()) else {
-        return hook::fault(kind);
+        return Some(hook::fault(kind));
     };
-    decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind))
+    if kind == HookKind::ConfigChange {
+        return Some(config_change(&payload, line).unwrap_or_else(|Fault| hook::fault(kind)));
+    }
+    if kind == HookKind::PreToolUse && json::from_slice(&payload).is_ok_and(|v| is_canary(&v)) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let _ = std::fs::write(line.state.join("canary"), now.to_string());
+        return None;
+    }
+    Some(decide_with(kind, &payload, &machine, inc).unwrap_or_else(|Fault| hook::fault(kind)))
+}
+
+/// `heddle doctor --canary` run as a Bash call: the live check.
+fn is_canary(v: &Value) -> bool {
+    let command = v
+        .get("tool_input")
+        .and_then(|i| i.get("command"))
+        .and_then(Value::as_str);
+    v.get("tool_name").and_then(Value::as_str) == Some("Bash")
+        && command.is_some_and(
+            |c| match c.split_whitespace().collect::<Vec<_>>().as_slice() {
+                [prog, "doctor", "--canary"] => prog.trim_matches(['"', '\'']).ends_with("heddle"),
+                _ => false,
+            },
+        )
+}
+
+/// Hook line 9 (T6, T15): a change to the main checkout's local settings
+/// that leaves this block's hook lines or `disableAllHooks: false` behind,
+/// or leaves a file that does not read, is refused for the running session.
+fn config_change(raw: &[u8], line: &Line) -> Result<Decision, Fault> {
+    let v = json::from_slice(raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw))
+        .map_err(|_| Fault)?;
+    let ours = line.root.join(".claude/settings.local.json");
+    let source = v.get("source").and_then(Value::as_str);
+    let file = v.get("file_path").and_then(Value::as_str).map(Path::new);
+    if source != Some("local_settings") || file != Some(ours.as_path()) {
+        return Ok(Decision::Pass);
+    }
+    let heddle = std::env::current_exe().map_err(|_| Fault)?;
+    let wiring = Wiring {
+        heddle: heddle.to_str().ok_or(Fault)?.to_string(),
+        root: line.root.to_str().ok_or(Fault)?.to_string(),
+        state: line.state.to_str().ok_or(Fault)?.to_string(),
+        home: String::new(),
+        count_only: false,
+    };
+    let now = std::fs::read(&ours)
+        .ok()
+        .and_then(|b| json::from_slice(&b).ok());
+    Ok(match now.map(|s| wiring.lines_intact(&s)) {
+        Some(Ok(())) => Decision::Pass,
+        Some(Err(_)) | None => Decision::BlockConfig(Msg::WiringKept),
+    })
 }
 
 /// Count mode: log each rule that fires, once per run, or R-00 when the
@@ -327,6 +388,9 @@ pub fn decide_with(
                 Some(out) => {
                     if let Some(ev) = out.event {
                         st.phi = phi::phi_step(st.phi, ev).0;
+                        if let Some(t) = v.get("transcript_path").and_then(Value::as_str) {
+                            machine.note_transcript(&conv, t);
+                        }
                     }
                     if out.strike {
                         st.strikes = st.strikes.saturating_add(1);
@@ -413,7 +477,8 @@ pub fn render(d: Decision) -> Option<Value> {
         }
         | Decision::BlockExpansion(m)
         | Decision::BlockCompaction(m)
-        | Decision::StopLoop(m) => Value::Object(block(&m)),
+        | Decision::StopLoop(m)
+        | Decision::BlockConfig(m) => Value::Object(block(&m)),
         Decision::Deny(m) => deny(&m, vec![]),
         Decision::DenyAndStop(m) => deny(&m, stop(&m)),
         Decision::ReplaceBash(m) => specific(
@@ -684,6 +749,82 @@ mod tests {
     }
 
     #[test]
+    fn t6_line_9_refuses_a_change_that_drops_a_line_or_does_not_parse() {
+        let (_, dir) = machine("line9");
+        let root = dir.join("repo");
+        std::fs::create_dir_all(root.join(".claude")).expect("dirs");
+        let file = root.join(".claude/settings.local.json");
+        let line = Line {
+            root: root.clone(),
+            state: dir.join("state"),
+            count_only: false,
+        };
+        let wiring = Wiring {
+            heddle: std::env::current_exe()
+                .expect("exe")
+                .to_str()
+                .expect("utf8")
+                .to_string(),
+            root: root.to_str().expect("utf8").to_string(),
+            state: dir.join("state").to_str().expect("utf8").to_string(),
+            home: String::new(),
+            count_only: false,
+        };
+        let good = json::to_string(&wiring.merge(None).expect("merges"));
+        let change = |path: &Path| {
+            payload(
+                "ConfigChange",
+                &format!(
+                    r#""source":"local_settings","file_path":"{}""#,
+                    path.display()
+                ),
+            )
+        };
+        std::fs::write(&file, &good).expect("write");
+        assert_eq!(
+            config_change(&change(&file), &line).ok(),
+            Some(Decision::Pass)
+        );
+        for broken in [
+            good.replace(r#""onFailure":"block""#, ""),
+            good.replace("PreToolUse", "Pre"),
+            "{\"hooks\": ".to_string(),
+        ] {
+            std::fs::write(&file, broken).expect("write");
+            assert_eq!(
+                config_change(&change(&file), &line).ok(),
+                Some(Decision::BlockConfig(Msg::WiringKept))
+            );
+        }
+        std::fs::remove_file(&file).expect("rm");
+        assert_eq!(
+            config_change(&change(&file), &line).ok(),
+            Some(Decision::BlockConfig(Msg::WiringKept))
+        );
+        // Another file, or another source, is not line 9's business.
+        assert_eq!(
+            config_change(&change(&dir.join("other.json")), &line).ok(),
+            Some(Decision::Pass)
+        );
+        let user = payload(
+            "ConfigChange",
+            r#""source":"user_settings","file_path":"/x""#,
+        );
+        assert_eq!(config_change(&user, &line).ok(), Some(Decision::Pass));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_canary_is_heddle_doctor_canary_run_as_bash() {
+        let c = |cmd: &str| is_canary(&json::from_slice(&bash("PreToolUse", cmd)).expect("json"));
+        assert!(c("/Users/me/.local/bin/heddle doctor --canary"));
+        assert!(c("heddle doctor --canary"));
+        assert!(!c("heddle doctor"));
+        assert!(!c("echo heddle doctor --canary"));
+        assert!(!c("/bin/cat doctor --canary"));
+    }
+
+    #[test]
     fn h1e_bad_input_is_a_fault() {
         let (m, dir) = machine("faults");
         let i = inc(b"inc-aaaaaa");
@@ -716,6 +857,7 @@ mod tests {
     fn the_arguments_are_both_paths_once_and_absolute_and_an_optional_mode() {
         let a = |s: &[&str]| parse_line(&s.iter().map(|x| x.to_string()).collect::<Vec<_>>());
         let brake = Some(Line {
+            root: PathBuf::from("/r"),
             state: PathBuf::from("/s"),
             count_only: false,
         });
@@ -726,6 +868,7 @@ mod tests {
             brake
         );
         let count = Some(Line {
+            root: PathBuf::from("/r"),
             state: PathBuf::from("/s"),
             count_only: true,
         });
@@ -783,6 +926,7 @@ mod tests {
         let conv = ConvId::parse(CONV.as_bytes()).expect("conv");
         assert!(!m.conv_path(&conv).exists(), "no label in count mode");
         let line = Line {
+            root: dir.clone(),
             state: dir.clone(),
             count_only: true,
         };

@@ -6,8 +6,11 @@
 
 use std::process::ExitCode;
 
+mod edge;
 mod hookrun;
+mod install;
 mod state;
+mod wiring;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -15,6 +18,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     match args.get(1).map(String::as_str) {
         Some("hook") => hookrun::run(args.get(2..).unwrap_or_default()),
+        Some("setup") => install::setup(args.get(2..).unwrap_or_default()),
+        Some("doctor") => install::doctor(args.get(2..).unwrap_or_default()),
+        Some("repair") => install::repair(),
+        Some("uninstall") => install::uninstall(),
+        Some("status") => install::status(),
         Some("version") => {
             println!("heddle {VERSION}");
             ExitCode::SUCCESS

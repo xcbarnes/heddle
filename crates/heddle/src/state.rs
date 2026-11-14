@@ -177,6 +177,42 @@ impl Machine {
         File::open(&dir)?.sync_all()
     }
 
+    /// Note where a conversation's transcript lives, once its label is
+    /// raised, so `status` can show it and `uninstall` can refuse while it
+    /// exists. A path, never content. Best effort.
+    pub fn note_transcript(&self, c: &ConvId, transcript: &str) {
+        let _ = fs::write(
+            self.dir.join("quarantine").join(format!("{c}.transcript")),
+            transcript,
+        );
+    }
+
+    /// Every conversation whose label pauses it (Exposed or Sealed, or a file
+    /// that cannot be read), with its transcript path if one was noted.
+    pub fn paused(&self) -> Vec<(String, Option<PathBuf>)> {
+        let dir = self.dir.join("quarantine");
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(String, Option<PathBuf>)> = entries
+            .flatten()
+            .filter_map(|e| {
+                let name = e.file_name().into_string().ok()?;
+                let conv = ConvId::parse(name.as_bytes())?;
+                let paused = fs::read(e.path())
+                    .ok()
+                    .and_then(|b| ConvState::decode(&b))
+                    .is_none_or(|st| matches!(st.phi, Phi::Exposed { .. } | Phi::Sealed { .. }));
+                let transcript = fs::read_to_string(dir.join(format!("{conv}.transcript")))
+                    .ok()
+                    .map(PathBuf::from);
+                paused.then_some((name, transcript))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     /// Log a hit that decided nothing, for tuning and for count mode: one
     /// line of Unix seconds, mode, event and rule id. Never the text, never
     /// the conversation. Best effort: counting is not a safety property.

@@ -511,6 +511,65 @@ pub fn to_string(v: &Value) -> String {
     out
 }
 
+/// The pretty form, as `serde_json::to_string_pretty` writes it: two spaces
+/// per level, `": "` after a key, and empty containers as `[]` and `{}`.
+/// For files people may edit by hand, such as Claude Code's settings.
+pub fn to_string_pretty(v: &Value) -> String {
+    enum Step<'a> {
+        Value(&'a Value, usize),
+        Text(&'static str),
+        Key(&'a str),
+        Line(usize),
+    }
+    let mut out = String::new();
+    let mut stack = alloc::vec![Step::Value(v, 0)];
+    while let Some(step) = stack.pop() {
+        match step {
+            Step::Text(t) => out.push_str(t),
+            Step::Line(depth) => {
+                out.push('\n');
+                for _ in 0..depth {
+                    out.push_str("  ");
+                }
+            }
+            Step::Key(k) => {
+                write_str(&mut out, k);
+                out.push_str(": ");
+            }
+            Step::Value(Value::Array(a), depth) if !a.is_empty() => {
+                out.push('[');
+                stack.push(Step::Text("]"));
+                stack.push(Step::Line(depth));
+                let inner = depth.saturating_add(1);
+                for (i, x) in a.iter().enumerate().rev() {
+                    stack.push(Step::Value(x, inner));
+                    stack.push(Step::Line(inner));
+                    if i > 0 {
+                        stack.push(Step::Text(","));
+                    }
+                }
+            }
+            Step::Value(Value::Object(o), depth) if !o.is_empty() => {
+                out.push('{');
+                stack.push(Step::Text("}"));
+                stack.push(Step::Line(depth));
+                let inner = depth.saturating_add(1);
+                for (i, (k, x)) in o.iter().enumerate().rev() {
+                    stack.push(Step::Value(x, inner));
+                    stack.push(Step::Key(k));
+                    stack.push(Step::Line(inner));
+                    if i > 0 {
+                        stack.push(Step::Text(","));
+                    }
+                }
+            }
+            // Scalars, and empty containers.
+            Step::Value(x, _) => out.push_str(&to_string(x)),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,
@@ -632,6 +691,17 @@ mod tests {
             r#"{"decision":"block","reason":"a \"quote\", a \\, a\nnewline, a \u0001 and é","n":[null,false,12]}"#
         );
         assert_eq!(from_slice(s.as_bytes()), Ok(v));
+    }
+
+    #[test]
+    fn the_pretty_form_is_serde_jsons_and_reads_back_the_same() {
+        let v = ok(r#"{"a":[1,{"b":null}],"c":{},"d":[],"e":"x\ny"}"#);
+        assert_eq!(
+            to_string_pretty(&v),
+            "{\n  \"a\": [\n    1,\n    {\n      \"b\": null\n    }\n  ],\n  \"c\": {},\n  \"d\": [],\n  \"e\": \"x\\ny\"\n}"
+        );
+        assert_eq!(from_slice(to_string_pretty(&v).as_bytes()), Ok(v));
+        assert_eq!(to_string_pretty(&Value::Bool(true)), "true");
     }
 
     #[test]

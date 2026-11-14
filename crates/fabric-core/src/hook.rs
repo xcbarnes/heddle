@@ -65,9 +65,9 @@ impl HookKind {
             HookKind::ConfigChange => "ConfigChange",
         }
     }
-    /// Whether this line carries `onFailure: "block"`.
+    /// Whether this line carries `onFailure: "block"` (in a brake repo).
     pub const fn is_phi_line(self) -> bool {
-        !matches!(self, HookKind::SessionStart | HookKind::ConfigChange)
+        !matches!(self, HookKind::SessionStart)
     }
 }
 
@@ -92,6 +92,8 @@ pub enum Msg {
     TurnStopped,
     /// heddle could not finish its check: a retry (row I3).
     Hiccup,
+    /// Hook line 9 refused a settings change that would remove heddle's lines.
+    WiringKept,
 }
 
 /// What a hook prints. `Pass` prints nothing at all: on several events plain
@@ -124,6 +126,8 @@ pub enum Decision {
     StopLoop(Msg),
     /// Any event: `continue: false`, Claude Code's universal stop.
     Halt(Msg),
+    /// ConfigChange: refuse the change for the running session (hook line 9).
+    BlockConfig(Msg),
 }
 
 /// The fixed table. Plain words; facts, not orders.
@@ -183,6 +187,11 @@ pub fn text(m: &Msg) -> String {
              were withheld. {SYNTHETIC} The conversation goes on with your next message."
         ),
         Msg::Hiccup => write!(s, "Fabric had a hiccup and found nothing. Try it again."),
+        Msg::WiringKept => write!(
+            s,
+            "Fabric kept this project's settings as they were for this session: the change would remove its \
+             checks. To remove Fabric, ask your agent to uninstall it."
+        ),
     };
     s
 }
@@ -231,8 +240,12 @@ fn stopped(kind: HookKind, m: Msg) -> Decision {
     }
 }
 
-/// Check 1 of every hook: the conversation's label (T6). `None`: go on.
+/// Check 1 of every hook: the conversation's label (T6). `None`: go on. A
+/// settings change is not the conversation's: hook line 9 judges it alone.
 pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
+    if kind == HookKind::ConfigChange {
+        return None;
+    }
     match brake {
         Brake::Clear => None,
         Brake::Held => match kind {
@@ -253,9 +266,11 @@ pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
 /// heddle could not finish its check (rule R-00). Before a tool runs that
 /// costs a retry and raises no label (decision 3(i)). After a tool has run,
 /// the turn stops; PostToolBatch's own scan of the same results is the net.
+/// A settings change it cannot check is refused for the running session.
 pub fn fault(kind: HookKind) -> Decision {
     match kind {
-        HookKind::SessionStart | HookKind::ConfigChange => Decision::Pass,
+        HookKind::SessionStart => Decision::Pass,
+        HookKind::ConfigChange => Decision::BlockConfig(Msg::Hiccup),
         HookKind::UserPromptSubmit => Decision::BlockPrompt {
             msg: Msg::Hiccup,
             suppress: false,
@@ -418,11 +433,15 @@ mod tests {
     fn a_paused_conversation_is_stopped_at_every_phi_line() {
         for k in KINDS {
             let d = brake_gate(k, Brake::Exposed(inc()));
-            if k.is_phi_line() {
+            if k.is_phi_line() && k != HookKind::ConfigChange {
                 assert!(d.is_some_and(|d| d != Decision::Pass), "{k:?}");
             }
             assert_eq!(brake_gate(k, Brake::Clear), None);
         }
+        assert_eq!(
+            brake_gate(HookKind::ConfigChange, Brake::Exposed(inc())),
+            None
+        );
         assert_eq!(
             brake_gate(HookKind::PreToolUse, Brake::Exposed(inc())),
             Some(Decision::DenyAndStop(Msg::StillPaused(inc())))
