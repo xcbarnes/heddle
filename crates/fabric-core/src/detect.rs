@@ -344,13 +344,16 @@ fn rule_mrn(t: &[u8], p: usize) -> Option<RuleId> {
         return None;
     }
     let mut n = 0usize;
+    let mut digit = false;
     while alnum_at(t, v.checked_add(n)?) {
+        digit = digit || digit_at(t, v.checked_add(n)?).is_some();
         n = n.checked_add(1)?;
         if n > 12 {
             return None;
         }
     }
-    (n >= 6).then_some(RuleId::R03)
+    // A record number holds a digit: `patient_id: string` is code, not a record.
+    (n >= 6 && digit).then_some(RuleId::R03)
 }
 
 // ---- R-04: a date of birth ----
@@ -793,6 +796,84 @@ pub fn detect(text: &[u8]) -> Verdict {
     detect_finish(detect_step(ScanState::new(), text))
 }
 
+// ---- the unescape pass ----
+
+/// JSON's escapes turned back into characters, in one blind pass over raw
+/// bytes: no parsing, so a partial line works too. In a JSON transcript a
+/// newline is the two bytes `\n`, so line-shaped rules (R-10, R-11, R-05's
+/// header row) cannot match the raw form; the raw-byte scans check both
+/// forms. An escape that is not well formed, and a lone surrogate, stay as
+/// they are.
+pub fn unescape(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0usize;
+    while let Some(b) = at(raw, i) {
+        let used = if b == b'\\' {
+            unescape_at(raw, i, &mut out)
+        } else {
+            out.push(b);
+            1
+        };
+        i = i.saturating_add(used);
+    }
+    out
+}
+
+/// Decode the escape whose backslash is at `i` into `out`; the bytes used.
+fn unescape_at(raw: &[u8], i: usize, out: &mut Vec<u8>) -> usize {
+    let short = match at_off(raw, i, 1) {
+        Some(b'"') => Some(b'"'),
+        Some(b'\\') => Some(b'\\'),
+        Some(b'/') => Some(b'/'),
+        Some(b'b') => Some(0x08),
+        Some(b'f') => Some(0x0C),
+        Some(b'n') => Some(b'\n'),
+        Some(b'r') => Some(b'\r'),
+        Some(b't') => Some(b'\t'),
+        Some(_) | None => None,
+    };
+    if let Some(c) = short {
+        out.push(c);
+        return 2;
+    }
+    let unit = |k: usize| i.checked_add(k).and_then(|j| hex4_at(raw, j));
+    let decoded = unit(0).and_then(|hi| match hi {
+        0xD800..=0xDBFF => {
+            let lo = unit(6).filter(|lo| (0xDC00..=0xDFFF).contains(lo))?;
+            let cp = hi
+                .checked_sub(0xD800)?
+                .checked_shl(10)?
+                .checked_add(lo.checked_sub(0xDC00)?)?
+                .checked_add(0x10000)?;
+            Some((char::from_u32(cp)?, 12))
+        }
+        0xDC00..=0xDFFF => None,
+        _ => Some((char::from_u32(hi)?, 6)),
+    });
+    match decoded {
+        Some((c, used)) => {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
+            used
+        }
+        None => {
+            out.push(b'\\');
+            1
+        }
+    }
+}
+
+/// The code unit of a `\uXXXX` escape whose backslash is at `i`.
+fn hex4_at(raw: &[u8], i: usize) -> Option<u32> {
+    if at(raw, i)? != b'\\' || at_off(raw, i, 1)? != b'u' {
+        return None;
+    }
+    (2..6).try_fold(0u32, |acc, k| {
+        let d = char::from(at_off(raw, i, k)?).to_digit(16)?;
+        acc.checked_mul(16)?.checked_add(d)
+    })
+}
+
 #[cfg(test)]
 #[allow(
     clippy::arithmetic_side_effects,
@@ -860,6 +941,51 @@ mod tests {
     }
 
     #[test]
+    fn the_unescape_pass_turns_json_escapes_back_into_characters() {
+        assert_eq!(
+            unescape(br#"a\nb\t\"c\\d\/e\r\b\f"#),
+            b"a\nb\t\"c\\d/e\r\x08\x0c".as_slice()
+        );
+        assert_eq!(
+            unescape(br#"\u00e9 \u20AC \ud83d\ude00"#),
+            "\u{e9} \u{20ac} \u{1f600}".as_bytes()
+        );
+        // Not well formed, or a lone surrogate: left as it is.
+        for raw in [
+            &br#"\x41"#[..],
+            br#"\u12"#,
+            br#"\ud83d"#,
+            br#"\ude00x"#,
+            br#"end\"#,
+        ] {
+            assert_eq!(unescape(raw), raw, "{raw:?}");
+        }
+        // A lone high surrogate stays; the escape after it still decodes.
+        assert_eq!(unescape(br#"\ud83d\u0041"#), br#"\ud83dA"#.as_slice());
+        // It agrees with the JSON reader on well-formed strings.
+        for body in [
+            r#"x\u0000y"#,
+            r#"\\n is not a newline"#,
+            r#"\"q\" \ud834\udd1e"#,
+        ] {
+            let quoted = alloc::format!("\"{body}\"");
+            let parsed = crate::json::from_slice(quoted.as_bytes()).ok();
+            let want = parsed
+                .as_ref()
+                .and_then(crate::json::Value::as_str)
+                .map(str::as_bytes);
+            assert_eq!(Some(unescape(body.as_bytes()).as_slice()), want, "{body}");
+        }
+        // A segment that starts after an escaped carriage return shows only once unescaped.
+        let raw = concat!(r#"MSH|^~\\&|A|B\rPID|1||4455"#, "66^^^X||Q^R");
+        assert_eq!(rules(raw), NO);
+        assert_eq!(
+            rules(core::str::from_utf8(&unescape(raw.as_bytes())).unwrap_or_default()),
+            [RuleId::R10]
+        );
+    }
+
+    #[test]
     fn r02_r03_r04_identifiers_after_their_labels() {
         let mbi = concat!("1EG4", "-TE5-MK73");
         assert_eq!(rules(&alloc::format!("Medicare id {mbi}")), [RuleId::R02]);
@@ -871,6 +997,15 @@ mod tests {
         );
         assert_eq!(rules(concat!("MRN: SYN-", "1234567")), NO, "synthetic");
         assert_eq!(rules("MRN: 12345"), NO, "too short");
+        // The value must hold a digit: field names and types are not records.
+        for code in [
+            "patient_id: string",
+            "MRN = unknown",
+            "patient id column",
+            "mrn: required",
+        ] {
+            assert_eq!(rules(code), NO, "{code}");
+        }
         assert_eq!(rules(concat!("DOB 1957", "-03-02")), [RuleId::R04]);
         assert_eq!(rules(concat!("date of birth: 3/2", "/1957")), [RuleId::R04]);
         assert_eq!(rules(concat!("birthdate March 2", ", 1957")), [RuleId::R04]);
