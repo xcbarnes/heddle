@@ -152,6 +152,7 @@ fn decide(kind: HookKind, line: &Line) -> Option<Decision> {
     let Ok(machine) = Machine::open(line.state.clone()) else {
         return Some(line.fault(kind));
     };
+    let machine = machine.with_second(line.root.join(".git/fabric/labels"));
     let payload = read_payload(kind);
     if line.count_only {
         count_hits(kind, payload.ok().as_deref(), &machine);

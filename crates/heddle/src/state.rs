@@ -107,6 +107,34 @@ impl ConvState {
 #[derive(Debug)]
 pub struct Machine {
     dir: PathBuf,
+    /// The second label copy's folder, `<git common dir>/fabric/labels`, so
+    /// one accidental `rm` does not clear a brake.
+    second: Option<PathBuf>,
+}
+
+/// One copy of a label, as read.
+enum Copy {
+    Missing,
+    Unreadable,
+    Entry(ConvState),
+}
+
+fn read_copy(path: &std::path::Path) -> Copy {
+    match fs::read(path) {
+        Ok(bytes) => ConvState::decode(&bytes).map_or(Copy::Unreadable, Copy::Entry),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Copy::Missing,
+        Err(_) => Copy::Unreadable,
+    }
+}
+
+/// How far a label stops the conversation, for choosing between two copies.
+fn rank(p: &Phi) -> u8 {
+    match p {
+        Phi::Clean => 0,
+        Phi::Held => 1,
+        Phi::Exposed { .. } => 2,
+        Phi::Sealed { .. } => 3,
+    }
 }
 
 impl Machine {
@@ -123,7 +151,15 @@ impl Machine {
             Err(e) if e.kind() != io::ErrorKind::AlreadyExists => return Err(e),
             Ok(()) | Err(_) => {}
         }
-        Ok(Machine { dir })
+        Ok(Machine { dir, second: None })
+    }
+
+    /// Keep a second copy of every label in `dir` too.
+    pub fn with_second(self, dir: PathBuf) -> Machine {
+        Machine {
+            second: Some(dir),
+            ..self
+        }
     }
 
     /// The machine folder's one lock, held until the file is dropped. The
@@ -146,15 +182,22 @@ impl Machine {
 
     /// The conversation's entry, and whether it must be written back. Missing
     /// is Clean. Unreadable or unknown is braked under `fresh`, and written
-    /// back so the brake holds at the next hook too.
+    /// back so the brake holds at the next hook too. With a second copy, the
+    /// more stopping of the two wins, either one unreadable is braked, and a
+    /// copy that is missing or behind is written back.
     pub fn read_conv(&self, c: &ConvId, fresh: IncidentId) -> (ConvState, bool) {
-        match fs::read(self.conv_path(c)) {
-            Ok(bytes) => match ConvState::decode(&bytes) {
-                Some(s) => (s, false),
-                None => (ConvState::braked(fresh), true),
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (ConvState::CLEAN, false),
-            Err(_) => (ConvState::braked(fresh), true),
+        let first = read_copy(&self.conv_path(c));
+        let second = match &self.second {
+            Some(d) => read_copy(&d.join(c.to_string())),
+            None => Copy::Missing,
+        };
+        match (first, second) {
+            (Copy::Unreadable, _) | (_, Copy::Unreadable) => (ConvState::braked(fresh), true),
+            (Copy::Missing, Copy::Missing) => (ConvState::CLEAN, false),
+            (Copy::Entry(a), Copy::Missing) => (a, self.second.is_some()),
+            (Copy::Missing, Copy::Entry(b)) => (b, true),
+            (Copy::Entry(a), Copy::Entry(b)) if rank(&b.phi) > rank(&a.phi) => (b, true),
+            (Copy::Entry(a), Copy::Entry(b)) => (a, a != b),
         }
     }
 
@@ -173,8 +216,23 @@ impl Machine {
             f.write_all(&s.encode())?;
             f.sync_all()?;
         }
-        fs::rename(&tmp, dir.join(name))?;
-        File::open(&dir)?.sync_all()
+        fs::rename(&tmp, dir.join(&name))?;
+        File::open(&dir)?.sync_all()?;
+        // The second copy, best effort: the first one is the one that must land.
+        if let Some(second) = &self.second {
+            let _ = fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(second);
+            let tmp = second.join(format!(".{name}.{}.tmp", std::process::id()));
+            if fs::write(&tmp, s.encode())
+                .and_then(|()| fs::rename(&tmp, second.join(&name)))
+                .is_err()
+            {
+                let _ = fs::remove_file(&tmp);
+            }
+        }
+        Ok(())
     }
 
     /// Note where a conversation's transcript lives, once its label is
@@ -263,6 +321,38 @@ mod tests {
         ] {
             assert_eq!(ConvState::decode(bad), None);
         }
+    }
+
+    #[test]
+    fn the_second_copy_survives_an_rm_and_the_more_stopping_copy_wins() {
+        let dir = std::env::temp_dir().join(format!("heddle-second-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("state")).expect("folder");
+        let m = Machine::open(dir.join("state"))
+            .expect("folder")
+            .with_second(dir.join("labels"));
+        let c = ConvId::parse(b"00893aaf-19fa-41d2-8238-13269b9b3ca0").expect("conv");
+        let fresh = IncidentId::parse(b"inc-bbbbbb").expect("id");
+        let held = ConvState {
+            phi: Phi::Held,
+            ..ConvState::CLEAN
+        };
+        m.write_conv(&c, &held).expect("write");
+        assert!(
+            dir.join("labels").join(c.to_string()).exists(),
+            "both copies written"
+        );
+        // One accidental rm: the other copy holds, and is written back.
+        fs::remove_file(m.conv_path(&c)).expect("rm");
+        assert_eq!(m.read_conv(&c, fresh), (held, true));
+        // The copies disagree: the more stopping one wins.
+        m.write_conv(&c, &ConvState::CLEAN).expect("write");
+        fs::write(dir.join("labels").join(c.to_string()), held.encode()).expect("write");
+        assert_eq!(m.read_conv(&c, fresh), (held, true));
+        // Either copy unreadable is braked.
+        fs::write(dir.join("labels").join(c.to_string()), b"garbage").expect("write");
+        assert_eq!(m.read_conv(&c, fresh), (ConvState::braked(fresh), true));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
