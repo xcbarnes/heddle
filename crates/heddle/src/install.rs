@@ -30,7 +30,8 @@ const COMMIT: &str = match option_env!("HEDDLE_COMMIT") {
     None => "local build",
 };
 const SETTINGS: &str = ".claude/settings.local.json";
-const EXCLUDE_LINE: &str = "/.claude/settings.local.json";
+/// Where setup keeps the settings file as it found it.
+const BACKUP: &str = ".claude/settings.local.json.fabric-backup";
 /// Bounds on the dry scan's walk of user and plugin command folders.
 const WALK_DEPTH: usize = 12;
 const WALK_FILES: usize = 50_000;
@@ -397,8 +398,8 @@ fn do_setup(count_only: bool) -> Result<String, String> {
     let file = repo.main.join(SETTINGS);
     let existing = match fs::read(&file) {
         Ok(bytes) => {
-            let backup = tmp_beside(&file).with_file_name("settings.local.json.fabric-backup");
-            fs::write(&backup, &bytes).map_err(|e| format!("could not keep a backup: {e}"))?;
+            fs::write(repo.main.join(BACKUP), &bytes)
+                .map_err(|e| format!("could not keep a backup: {e}"))?;
             Some(json::from_slice(&bytes).map_err(|_| {
                 format!(
                     "{} is not valid JSON. Fix it or move it aside, then run setup again.",
@@ -458,15 +459,19 @@ fn do_setup(count_only: bool) -> Result<String, String> {
     Ok(out)
 }
 
-/// Keep the settings file out of commits: one line in `.git/info/exclude`,
-/// unless git already ignores it. No git config is changed.
+/// Keep the settings file and setup's backup of it out of commits: a line
+/// each in `.git/info/exclude`, for those git does not already ignore. No
+/// git config is changed.
 fn exclude(repo: &Repo) -> Result<(), String> {
-    if edge::run(&Program::Git, &repo.main, &["check-ignore", "-q", SETTINGS]).is_some() {
-        return Ok(());
-    }
     let path = repo.common.join("info/exclude");
     let text = fs::read_to_string(&path).unwrap_or_default();
-    if text.lines().any(|l| l.trim() == EXCLUDE_LINE) {
+    let missing: Vec<String> = [SETTINGS, BACKUP]
+        .into_iter()
+        .filter(|f| edge::run(&Program::Git, &repo.main, &["check-ignore", "-q", f]).is_none())
+        .map(|f| format!("/{f}"))
+        .filter(|line| !text.lines().any(|l| l.trim() == line))
+        .collect();
+    if missing.is_empty() {
         return Ok(());
     }
     mkdirs(&repo.common.join("info"), 0o755)?;
@@ -477,7 +482,7 @@ fn exclude(repo: &Repo) -> Result<(), String> {
     };
     write_atomic(
         &path,
-        format!("{text}{sep}{EXCLUDE_LINE}\n").as_bytes(),
+        format!("{text}{sep}{}\n", missing.join("\n")).as_bytes(),
         0o644,
     )
 }
@@ -554,7 +559,7 @@ fn canary_ran() -> ExitCode {
             secs(SystemTime::now()).to_string(),
         );
     }
-    println!(
+    out!(
         "FAIL OPEN: this Claude Code ran a check that failed on purpose, so it does not block on a broken check."
     );
     ExitCode::from(1)
@@ -659,7 +664,7 @@ fn report() -> ExitCode {
         .unwrap_or(0);
     lines.push(format!("Paused conversations on this computer: {paused}."));
     for l in &lines {
-        println!("{l}");
+        out!("{l}");
     }
     if ok {
         ExitCode::SUCCESS
@@ -675,7 +680,7 @@ fn report() -> ExitCode {
 pub fn repair() -> ExitCode {
     match do_repair() {
         Ok(text) => {
-            println!("{text}");
+            out!("{text}");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e),
@@ -720,7 +725,7 @@ fn do_repair() -> Result<String, String> {
 pub fn uninstall() -> ExitCode {
     match do_uninstall() {
         Ok(text) => {
-            println!("{text}");
+            out!("{text}");
             ExitCode::SUCCESS
         }
         Err(e) => fail(&e),
@@ -801,13 +806,13 @@ pub fn phi(args: &[String]) -> ExitCode {
         return fail("HOME is not set to an absolute folder");
     };
     let Ok(m) = Machine::open(p.state.clone()) else {
-        println!("Not set up on this computer.");
+        out!("Not set up on this computer.");
         return ExitCode::SUCCESS;
     };
     let repos = Receipt::read(&p.receipt).repos();
     let paused = m.paused();
     if paused.is_empty() {
-        println!("No paused conversations.");
+        out!("No paused conversations.");
     }
     for (name, transcript) in paused {
         let Some(conv) = fabric_core::ids::ConvId::parse(name.as_bytes()) else {
@@ -857,7 +862,7 @@ pub fn phi(args: &[String]) -> ExitCode {
             (true, Err(_)) => "still paused: could not take the lock",
             (false, _) => "still paused: no rewind past the flagged turn found on disk",
         };
-        println!("{name}: {outcome}");
+        out!("{name}: {outcome}");
     }
     ExitCode::SUCCESS
 }
@@ -869,16 +874,16 @@ pub fn status() -> ExitCode {
     let Ok(p) = Paths::new() else {
         return fail("HOME is not set to an absolute folder");
     };
-    println!("heddle {VERSION} ({COMMIT})");
+    out!("heddle {VERSION} ({COMMIT})");
     let Ok(m) = Machine::open(p.state.clone()) else {
-        println!("Not set up on this computer.");
+        out!("Not set up on this computer.");
         return ExitCode::SUCCESS;
     };
     let paused = m.paused();
-    println!("Paused conversations: {}", paused.len());
+    out!("Paused conversations: {}", paused.len());
     for (conv, t) in paused {
         let where_ = t.map_or("transcript not noted".into(), |t| t.display().to_string());
-        println!("  {conv}: {where_}");
+        out!("  {conv}: {where_}");
     }
     let week = secs(SystemTime::now()).saturating_sub(7 * 24 * 3600);
     let log = fs::read_to_string(p.state.join("counts")).unwrap_or_default();
@@ -899,7 +904,7 @@ pub fn status() -> ExitCode {
     }
     counts.sort();
     let shown: Vec<String> = counts.iter().map(|(k, n)| format!("{k} {n}")).collect();
-    println!(
+    out!(
         "Hits logged in the last 7 days: {}",
         if shown.is_empty() {
             "none".into()

@@ -74,6 +74,7 @@ echo "  line 9 left its trace (config-refused): $(yn test -f "$fabric/machine/co
 echo "== doctor sees the stripped file (expect BROKEN, exit 1), then setup restores it"
 h "$wt" "$installed" doctor | grep -i wiring | sed 's/^/  /'
 h "$wt" "$installed" setup > /dev/null; echo "  setup again: exit $?"
+echo "  git ignores setup's backup of the settings file: $(yn h "$wt" git check-ignore -q .claude/settings.local.json.fabric-backup)"
 h "$wt" "$installed" doctor | grep -i -E 'wiring|live' | sed 's/^/  /'
 
 echo "== repair: the installed binary is deleted; the kept copy puts it back"
