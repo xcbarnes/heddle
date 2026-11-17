@@ -37,24 +37,47 @@ const WALK_FILES: usize = 50_000;
 const SCAN_CAP: u64 = 16 * 1024 * 1024;
 
 /// heddle's places under the home folder.
-struct Paths {
-    home: PathBuf,
-    bin: PathBuf,
-    fabric: PathBuf,
-    state: PathBuf,
-    kept: PathBuf,
-    receipt: PathBuf,
-    repair: PathBuf,
+pub(crate) struct Paths {
+    pub(crate) home: PathBuf,
+    pub(crate) bin: PathBuf,
+    pub(crate) fabric: PathBuf,
+    pub(crate) state: PathBuf,
+    pub(crate) kept: PathBuf,
+    pub(crate) receipt: PathBuf,
+    pub(crate) repair: PathBuf,
 }
 
 impl Paths {
-    fn new() -> Result<Paths, String> {
+    pub(crate) fn new() -> Result<Paths, String> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .filter(|h| h.is_absolute());
         let home = home.ok_or("HOME is not set to an absolute folder")?;
+        Ok(Paths::under(home))
+    }
+
+    /// The install this binary belongs to: the home folder holding it at
+    /// `.local/bin/heddle`, else `HOME`. The verbs use it, since an agent's
+    /// Bash call gets its `HOME` from settings a pull can change.
+    pub(crate) fn of_this_binary() -> Result<Paths, String> {
+        let exe = std::env::current_exe().ok();
+        let home = exe.as_deref().and_then(|e| {
+            let bin = e.parent()?;
+            let local = bin.parent()?;
+            let named = e.file_name()? == "heddle"
+                && bin.file_name()? == "bin"
+                && local.file_name()? == ".local";
+            named.then(|| local.parent().map(Path::to_path_buf))?
+        });
+        match home {
+            Some(h) => Ok(Paths::under(h)),
+            None => Paths::new(),
+        }
+    }
+
+    fn under(home: PathBuf) -> Paths {
         let fabric = home.join("Library/Application Support/fabric");
-        Ok(Paths {
+        Paths {
             bin: home.join(".local/bin/heddle"),
             state: fabric.join("machine"),
             kept: fabric.join("kept/heddle"),
@@ -62,20 +85,20 @@ impl Paths {
             repair: fabric.join("REPAIR.txt"),
             fabric,
             home,
-        })
+        }
     }
 }
 
 /// A repository's main checkout and git common folder.
-struct Repo {
-    main: PathBuf,
-    common: PathBuf,
+pub(crate) struct Repo {
+    pub(crate) main: PathBuf,
+    pub(crate) common: PathBuf,
 }
 
 /// The repository holding `start`, found from git's own files without
 /// running git. A linked worktree leads to its main checkout. A bare
 /// repository, or a git folder kept elsewhere, is not supported.
-fn find_repo(start: &Path) -> Option<Repo> {
+pub(crate) fn find_repo(start: &Path) -> Option<Repo> {
     for dir in start.ancestors() {
         let dot = dir.join(".git");
         let Ok(meta) = fs::metadata(&dot) else {
@@ -160,12 +183,12 @@ fn fail(msg: &str) -> ExitCode {
 /// What setup did, as `key value` lines: kept for `doctor`, `repair` and
 /// `uninstall`, and nothing else. Repos are `repo brake|count <path>`.
 #[derive(Debug, Default)]
-struct Receipt {
+pub(crate) struct Receipt {
     lines: Vec<(String, String)>,
 }
 
 impl Receipt {
-    fn read(path: &Path) -> Receipt {
+    pub(crate) fn read(path: &Path) -> Receipt {
         let text = fs::read_to_string(path).unwrap_or_default();
         let lines = text
             .lines()
@@ -187,7 +210,7 @@ impl Receipt {
         self.lines.push((key.to_string(), value));
     }
     /// The repos setup wired: (count mode, main checkout).
-    fn repos(&self) -> Vec<(bool, PathBuf)> {
+    pub(crate) fn repos(&self) -> Vec<(bool, PathBuf)> {
         self.lines
             .iter()
             .filter(|(k, _)| k == "repo")
@@ -477,6 +500,37 @@ fn repair_note(p: &Paths, main: &Path) -> String {
         kept = p.kept.display(),
         main = main.display(),
     )
+}
+
+// ---- the tripwire ----
+
+/// Whether this repo is wired as setup left it: the receipt names it, its
+/// settings file reads, and the block is intact. `Ok(count_only)`; `Err`
+/// names what is wrong. Agent verbs check this first (§5 item 3).
+pub(crate) fn wiring_ok(p: &Paths, repo: &Repo) -> Result<bool, &'static str> {
+    let receipt = Receipt::read(&p.receipt);
+    let (count_only, _) = receipt
+        .repos()
+        .into_iter()
+        .find(|(_, m)| *m == repo.main)
+        .ok_or("this project is not set up")?;
+    if !receipt.matches("binary", &p.bin) {
+        return Err("the installed heddle differs from the one setup installed");
+    }
+    let wiring = Wiring {
+        heddle: p.bin.display().to_string(),
+        root: repo.main.display().to_string(),
+        state: p.state.display().to_string(),
+        home: p.home.display().to_string(),
+        count_only,
+    };
+    let settings = fs::read(repo.main.join(SETTINGS))
+        .ok()
+        .and_then(|b| json::from_slice(&b).ok());
+    settings
+        .ok_or("the settings file is missing or not valid JSON")
+        .and_then(|v| wiring.intact(&v))?;
+    Ok(count_only)
 }
 
 // ---- doctor ----

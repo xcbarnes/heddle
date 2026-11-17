@@ -1,14 +1,18 @@
 //! heddle: Fabric's command-line tool.
 //!
-//! v0.1 starts with the PHI brake: `heddle hook claude-code <Event>` is the
-//! hook line for every Claude Code event. Coordination (the room, claims,
-//! news) comes next. Arguments are parsed by hand; there is no parser crate.
+//! `heddle hook claude-code <Event>` is the hook line for every Claude Code
+//! event: the PHI brake first, then coordination. The agent verbs (`next`,
+//! `claim`, `release`, `done`, `pause`, `status`) and the person's (`stop`,
+//! `resume`) work the local room. Arguments are parsed by hand; there is no
+//! parser crate.
 
 use std::process::ExitCode;
 
+mod coord;
 mod edge;
 mod hookrun;
 mod install;
+mod room;
 mod state;
 mod wiring;
 
@@ -22,7 +26,9 @@ fn main() -> ExitCode {
         Some("doctor") => install::doctor(args.get(2..).unwrap_or_default()),
         Some("repair") => install::repair(),
         Some("uninstall") => install::uninstall(),
-        Some("status") => install::status(),
+        Some(
+            verb @ ("next" | "claim" | "release" | "done" | "pause" | "stop" | "resume" | "status"),
+        ) => coord::verb(verb, args.get(2..).unwrap_or_default()),
         Some("phi") => install::phi(args.get(2..).unwrap_or_default()),
         Some("version") => {
             println!("heddle {VERSION}");

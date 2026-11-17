@@ -24,6 +24,8 @@ const ENV_OFF: [(&str, &str); 3] = [
 ];
 /// Model calls that no hook gates, switched off in a brake repo.
 const OFF_KEYS: [&str; 2] = ["promptSuggestionEnabled", "awaySummaryEnabled"];
+/// The agent verbs, allowed without a prompt in every mode (D3, T22).
+const VERBS: [&str; 6] = ["next", "claim", "release", "done", "pause", "status"];
 
 /// Everything the block names, as the strings it writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,7 +57,23 @@ impl Wiring {
         if !self.count_only {
             l.push((HookKind::ConfigChange, Some("local_settings")));
         }
+        // Coordination's: they cannot block anything.
+        l.push((HookKind::Stop, None));
+        l.push((HookKind::SessionEnd, None));
         l
+    }
+
+    /// The allow rules for the agent verbs: by absolute path and by bare
+    /// name, with and without arguments.
+    pub fn allow(&self) -> Vec<String> {
+        let mut rules = Vec::new();
+        for v in VERBS {
+            for prog in [self.heddle.as_str(), "heddle"] {
+                rules.push(format!("Bash({prog} {v})"));
+                rules.push(format!("Bash({prog} {v} *)"));
+            }
+        }
+        rules
     }
 
     /// One hook line, in exec form.
@@ -81,7 +99,7 @@ impl Wiring {
             ),
             ("timeout".to_string(), Value::Number("10".to_string())),
         ];
-        if !self.count_only && kind != HookKind::SessionStart {
+        if !self.count_only && kind.is_phi_line() {
             o.push(("onFailure".to_string(), Value::str("block")));
         }
         Value::Object(o)
@@ -131,12 +149,14 @@ impl Wiring {
             g.push(("hooks".to_string(), Value::Array(vec![self.line(kind)])));
             groups.push(Value::Object(g));
         }
-        let deny = self.deny();
-        if !deny.is_empty() {
-            let rules = child_array(child_object(&mut top, "permissions")?, "deny")?;
-            for r in deny {
-                if !rules.iter().any(|x| x.as_str() == Some(r.as_str())) {
-                    rules.push(Value::str(&r));
+        for (list, rules) in [("allow", self.allow()), ("deny", self.deny())] {
+            if rules.is_empty() {
+                continue;
+            }
+            let have = child_array(child_object(&mut top, "permissions")?, list)?;
+            for r in rules {
+                if !have.iter().any(|x| x.as_str() == Some(r.as_str())) {
+                    have.push(Value::str(&r));
                 }
             }
         }
@@ -160,12 +180,13 @@ impl Wiring {
             return existing;
         };
         let _ = strip_lines(&mut top);
-        let deny = self.deny();
         if let Some(Value::Object(perms)) = get_mut(&mut top, "permissions") {
-            if let Some(Value::Array(rules)) = get_mut(perms, "deny") {
-                rules.retain(|r| !r.as_str().is_some_and(|s| deny.iter().any(|d| d == s)));
+            for (list, ours) in [("allow", self.allow()), ("deny", self.deny())] {
+                if let Some(Value::Array(rules)) = get_mut(perms, list) {
+                    rules.retain(|r| !r.as_str().is_some_and(|s| ours.iter().any(|d| d == s)));
+                }
+                drop_if_empty(perms, list);
             }
-            drop_if_empty(perms, "deny");
         }
         drop_if_empty(&mut top, "permissions");
         top.retain(|(k, v)| !(k == "disableAllHooks" && *v == Value::Bool(false)));

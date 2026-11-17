@@ -62,18 +62,64 @@ pub fn run(args: &[String]) -> ExitCode {
         _ => None,
     };
     let Some(kind) = kind else {
-        return emit(Decision::Halt(Msg::Hiccup), "");
+        return print(render(Decision::Halt(Msg::Hiccup), ""));
     };
-    let outcome = match parse_line(args.get(2..).unwrap_or_default()) {
-        Some(line) if armed => std::panic::catch_unwind(|| decide(kind, &line))
-            .unwrap_or_else(|_| Some((line.fault(kind), String::new()))),
-        Some(line) => Some((line.fault(kind), String::new())),
-        None => Some((hook::fault(kind), String::new())),
+    let line = parse_line(args.get(2..).unwrap_or_default());
+    let outcome = match &line {
+        Some(line) if armed => std::panic::catch_unwind(|| decide(kind, line))
+            .unwrap_or_else(|_| Some((line.fault(kind), String::new(), None))),
+        Some(line) => Some((line.fault(kind), String::new(), None)),
+        None => Some((hook::fault(kind), String::new(), None)),
     };
-    match outcome {
-        Some((decision, file_path)) => emit(decision, &file_path),
-        // The live check's canary: fail on purpose, print nothing.
-        None => ExitCode::from(STOPPED),
+    // The live check's canary: fail on purpose, print nothing.
+    let Some((decision, file_path, payload)) = outcome else {
+        return ExitCode::from(STOPPED);
+    };
+    // The second deadline (§4): coordination runs only once the PHI verdict
+    // has let the action go on, and fails open.
+    let added = match (&line, payload) {
+        (Some(l), Some(raw)) if matches!(decision, Decision::Pass | Decision::Replace(..)) => {
+            std::panic::catch_unwind(|| coordinate(kind, &raw, l)).unwrap_or_default()
+        }
+        (Some(_) | None, Some(_) | None) => crate::coord::Added::default(),
+    };
+    let decision = match (decision, added.deny) {
+        (Decision::Pass, Some(m)) if kind == HookKind::PreToolUse => Decision::Deny(m),
+        (d, Some(_) | None) => d,
+    };
+    let out = render(decision, &file_path);
+    print(match added.context {
+        Some(c) => with_context(out, kind, &c),
+        None => out,
+    })
+}
+
+/// The coordination step, given the payload a non-blocking verdict let through.
+fn coordinate(kind: HookKind, raw: &[u8], line: &Line) -> crate::coord::Added {
+    let raw = raw.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(raw);
+    let (Ok(v), Ok(me)) = (json::from_slice(raw), std::env::current_exe()) else {
+        return crate::coord::Added::default();
+    };
+    crate::coord::hook(kind, &v, &line.root, &me.display().to_string())
+}
+
+/// Add a line for the agent's context to a non-blocking output.
+fn with_context(v: Option<Value>, kind: HookKind, context: &str) -> Option<Value> {
+    match v {
+        None => Some(specific(
+            kind,
+            [("additionalContext", Value::str(context))],
+            vec![],
+        )),
+        Some(Value::Object(mut top)) => {
+            if let Some((_, Value::Object(inner))) =
+                top.iter_mut().find(|(k, _)| k == "hookSpecificOutput")
+            {
+                inner.push(("additionalContext".to_string(), Value::str(context)));
+            }
+            Some(Value::Object(top))
+        }
+        Some(other) => Some(other),
     }
 }
 
@@ -149,16 +195,17 @@ fn arm_watchdog() -> bool {
 
 /// The decision for this run, with the Read call's file path for a
 /// replacement; `None` only for the live check's canary.
-fn decide(kind: HookKind, line: &Line) -> Option<(Decision, String)> {
-    let plain = |d: Decision| Some((d, String::new()));
+fn decide(kind: HookKind, line: &Line) -> Option<(Decision, String, Option<Vec<u8>>)> {
+    let plain = |d: Decision| Some((d, String::new(), None));
     let Ok(machine) = Machine::open(line.state.clone()) else {
         return plain(line.fault(kind));
     };
     let machine = machine.with_second(line.root.join(".git/fabric/labels"));
     let payload = read_payload(kind);
     if line.count_only {
-        count_hits(kind, payload.ok().as_deref(), &machine);
-        return plain(Decision::Pass);
+        let bytes = payload.ok();
+        count_hits(kind, bytes.as_deref(), &machine);
+        return Some((Decision::Pass, String::new(), bytes));
     }
     let (Ok(payload), Some(inc)) = (payload, fresh_incident()) else {
         return plain(hook::fault(kind));
@@ -187,7 +234,7 @@ fn decide(kind: HookKind, line: &Line) -> Option<(Decision, String)> {
     } else {
         String::new()
     };
-    Some((d, file_path))
+    Some((d, file_path, Some(payload)))
 }
 
 /// The newest message id in a transcript, from its last 256 KiB.
@@ -842,8 +889,8 @@ pub fn render(d: Decision, file_path: &str) -> Option<Value> {
 
 /// Print the decision in one write. A stop that cannot be printed exits
 /// non-zero, so the harness still blocks.
-fn emit(d: Decision, file_path: &str) -> ExitCode {
-    let Some(v) = render(d, file_path) else {
+fn print(v: Option<Value>) -> ExitCode {
+    let Some(v) = v else {
         return ExitCode::SUCCESS;
     };
     let mut out = std::io::stdout().lock();
