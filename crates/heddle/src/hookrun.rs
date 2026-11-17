@@ -908,6 +908,26 @@ fn print(v: Option<Value>) -> ExitCode {
 mod tests {
     use super::*;
 
+    #[test]
+    fn coordination_context_joins_the_verdicts_output() {
+        let alone = with_context(None, HookKind::SessionStart, "hello").expect("an output");
+        assert_eq!(
+            json::to_string(&alone),
+            r#"{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"hello"}}"#
+        );
+        let replaced = specific(
+            HookKind::PostToolUse,
+            [("updatedToolOutput", Value::str("x"))],
+            vec![],
+        );
+        let both = with_context(Some(replaced), HookKind::PostToolUse, "hi").expect("an output");
+        let text = json::to_string(&both);
+        assert!(
+            text.contains(r#""updatedToolOutput":"x","additionalContext":"hi""#),
+            "{text}"
+        );
+    }
+
     // Split across literals so the repo's own scan never sees it whole.
     const SSN: &str = concat!("987-12", "-3456");
     const CONV: &str = "00893aaf-19fa-41d2-8238-13269b9b3ca0";

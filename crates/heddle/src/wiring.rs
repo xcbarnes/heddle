@@ -410,7 +410,38 @@ mod tests {
                 "Cd"
             ]
         );
-        assert!(merged.get("hooks").and_then(|h| h.get("Stop")).is_some());
+        // The agent verbs run without a prompt; the person's stop and
+        // resume do not.
+        let allow: Vec<&str> = merged
+            .get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(Value::as_array)
+            .expect("allow")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(allow.first(), Some(&"Bash(npm test)"));
+        for rule in [
+            "Bash(/Users/me/.local/bin/heddle claim *)",
+            "Bash(/Users/me/.local/bin/heddle next)",
+            "Bash(heddle done *)",
+        ] {
+            assert!(allow.contains(&rule), "{rule}");
+        }
+        assert!(
+            !allow
+                .iter()
+                .any(|r| r.contains(" stop") || r.contains(" resume"))
+        );
+        // The person's own Stop line stays beside coordination's, which
+        // cannot block.
+        let stops = merged
+            .get("hooks")
+            .and_then(|h| h.get("Stop"))
+            .and_then(Value::as_array)
+            .expect("Stop lines");
+        assert_eq!(stops.len(), 2);
+        assert!(!json::to_string(stops.get(1).expect("ours")).contains("onFailure"));
         // Merging twice changes nothing.
         let again = w(false).merge(Some(merged.clone())).expect("merges");
         assert_eq!(json::to_string(&again), json::to_string(&merged));
