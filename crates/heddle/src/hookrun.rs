@@ -346,7 +346,9 @@ fn scan_text(kind: HookKind, v: &Value) -> Option<Vec<u8>> {
         HookKind::SessionStart
         | HookKind::UserPromptExpansion
         | HookKind::PreCompact
-        | HookKind::ConfigChange => return None,
+        | HookKind::ConfigChange
+        | HookKind::Stop
+        | HookKind::SessionEnd => return None,
     };
     let mut out = Vec::new();
     if !matches!(target, Value::String(_)) {
@@ -406,7 +408,9 @@ pub fn decide_with(
         | HookKind::PostToolUse
         | HookKind::PostToolBatch
         | HookKind::PreCompact
-        | HookKind::ConfigChange => {}
+        | HookKind::ConfigChange
+        | HookKind::Stop
+        | HookKind::SessionEnd => {}
     }
 
     // Fork matching (T13): a fork gets a new id and no label, but keeps its
@@ -461,7 +465,9 @@ pub fn decide_with(
         | HookKind::UserPromptExpansion
         | HookKind::PostToolUse
         | HookKind::PostToolBatch
-        | HookKind::ConfigChange => false,
+        | HookKind::ConfigChange
+        | HookKind::Stop
+        | HookKind::SessionEnd => false,
     };
     let stale_calls: Vec<Pending> = machine
         .pending(&conv)

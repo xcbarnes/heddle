@@ -35,6 +35,10 @@ pub enum HookKind {
     PreCompact,
     /// A settings file changed.
     ConfigChange,
+    /// A turn ended: coordination marks the seat's claims "waiting on a person".
+    Stop,
+    /// The session ended: coordination releases the seat's claims.
+    SessionEnd,
 }
 
 impl HookKind {
@@ -49,6 +53,8 @@ impl HookKind {
             b"PostToolBatch" => Some(HookKind::PostToolBatch),
             b"PreCompact" => Some(HookKind::PreCompact),
             b"ConfigChange" => Some(HookKind::ConfigChange),
+            b"Stop" => Some(HookKind::Stop),
+            b"SessionEnd" => Some(HookKind::SessionEnd),
             _ => None,
         }
     }
@@ -63,11 +69,17 @@ impl HookKind {
             HookKind::PostToolBatch => "PostToolBatch",
             HookKind::PreCompact => "PreCompact",
             HookKind::ConfigChange => "ConfigChange",
+            HookKind::Stop => "Stop",
+            HookKind::SessionEnd => "SessionEnd",
         }
     }
     /// Whether this line carries `onFailure: "block"` (in a brake repo).
+    /// Stop and SessionEnd are coordination's, and cannot block anything.
     pub const fn is_phi_line(self) -> bool {
-        !matches!(self, HookKind::SessionStart)
+        !matches!(
+            self,
+            HookKind::SessionStart | HookKind::Stop | HookKind::SessionEnd
+        )
     }
 }
 
@@ -354,7 +366,7 @@ fn stopped(kind: HookKind, m: Msg) -> Decision {
         HookKind::PostToolUse => Decision::Halt(m),
         HookKind::PostToolBatch => Decision::StopLoop(m),
         HookKind::PreCompact => Decision::BlockCompaction(m),
-        HookKind::ConfigChange => Decision::Pass,
+        HookKind::ConfigChange | HookKind::Stop | HookKind::SessionEnd => Decision::Pass,
     }
 }
 
@@ -374,7 +386,9 @@ pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
             | HookKind::PreToolUse
             | HookKind::PostToolUse
             | HookKind::PostToolBatch
-            | HookKind::ConfigChange => None,
+            | HookKind::ConfigChange
+            | HookKind::Stop
+            | HookKind::SessionEnd => None,
         },
         Brake::Exposed(inc) => Some(stopped(kind, Msg::StillPaused(inc))),
         Brake::Sealed => Some(stopped(kind, Msg::Sealed)),
@@ -387,7 +401,7 @@ pub fn brake_gate(kind: HookKind, brake: Brake) -> Option<Decision> {
 /// A settings change it cannot check is refused for the running session.
 pub fn fault(kind: HookKind) -> Decision {
     match kind {
-        HookKind::SessionStart => Decision::Pass,
+        HookKind::SessionStart | HookKind::Stop | HookKind::SessionEnd => Decision::Pass,
         HookKind::ConfigChange => Decision::BlockConfig(Msg::Hiccup),
         HookKind::UserPromptSubmit => Decision::BlockPrompt {
             msg: Msg::Hiccup,
@@ -500,7 +514,9 @@ pub fn on_hit(
         HookKind::SessionStart
         | HookKind::UserPromptExpansion
         | HookKind::PreCompact
-        | HookKind::ConfigChange => None,
+        | HookKind::ConfigChange
+        | HookKind::Stop
+        | HookKind::SessionEnd => None,
     }
 }
 
@@ -517,7 +533,7 @@ pub fn turn_gate(kind: HookKind, withheld_this_turn: u8) -> Option<Decision> {
 mod tests {
     use super::*;
 
-    const KINDS: [HookKind; 8] = [
+    const KINDS: [HookKind; 10] = [
         HookKind::SessionStart,
         HookKind::UserPromptSubmit,
         HookKind::UserPromptExpansion,
@@ -526,6 +542,8 @@ mod tests {
         HookKind::PostToolBatch,
         HookKind::PreCompact,
         HookKind::ConfigChange,
+        HookKind::Stop,
+        HookKind::SessionEnd,
     ];
 
     fn inc() -> IncidentId {
@@ -546,7 +564,7 @@ mod tests {
         for k in KINDS {
             assert_eq!(HookKind::parse(k.name().as_bytes()), Some(k));
         }
-        assert_eq!(HookKind::parse(b"Stop"), None);
+        assert_eq!(HookKind::parse(b"SubagentStop"), None);
     }
 
     #[test]
