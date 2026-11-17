@@ -358,7 +358,7 @@ pub fn hook(kind: HookKind, v: &Value, root: &Path, heddle: &str) -> Added {
 // ---- the agent verbs ----
 
 fn say(line: &str, ok: bool) -> ExitCode {
-    println!("{line}");
+    out!("{line}");
     if ok {
         ExitCode::SUCCESS
     } else {
@@ -571,7 +571,7 @@ fn status(common: &Path) {
     let r = Room::decode(&text);
     let now = now_ms();
     let seats = r.present(now);
-    println!(
+    out!(
         "Conversations active in this project in the last 15 minutes: {}",
         seats.len()
     );
@@ -583,13 +583,13 @@ fn status(common: &Path) {
             } else {
                 ""
             };
-            println!("  {} held by {o}{note}", k.as_str());
+            out!("  {} held by {o}{note}", k.as_str());
         }
     }
     match r.level(now) {
         Level::Running => {}
-        Level::Paused { until } => println!("Paused for another {} minutes.", minutes(until, now)),
-        Level::Stopped { until } => println!(
+        Level::Paused { until } => out!("Paused for another {} minutes.", minutes(until, now)),
+        Level::Stopped { until } => out!(
             "Stopped: pushes held for another {} minutes.",
             minutes(until, now)
         ),

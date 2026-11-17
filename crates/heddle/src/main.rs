@@ -8,6 +8,15 @@
 
 use std::process::ExitCode;
 
+/// `println!` that never panics: output cut short (`heddle status | head`)
+/// is not a fault.
+macro_rules! out {
+    ($($arg:tt)*) => {{
+        use std::io::Write as _;
+        let _ = writeln!(std::io::stdout(), $($arg)*);
+    }};
+}
+
 mod coord;
 mod edge;
 mod hookrun;
@@ -31,7 +40,7 @@ fn main() -> ExitCode {
         ) => coord::verb(verb, args.get(2..).unwrap_or_default()),
         Some("phi") => install::phi(args.get(2..).unwrap_or_default()),
         Some("version") => {
-            println!("heddle {VERSION}");
+            out!("heddle {VERSION}");
             ExitCode::SUCCESS
         }
         _ => {
