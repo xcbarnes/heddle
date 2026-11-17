@@ -74,8 +74,13 @@ impl Key {
 
 /// A path as the room stores it: printable ASCII, absolute, at most 400
 /// bytes. Others are not tracked.
+/// A footprint: a file's path within its checkout, so edits to one file in
+/// two worktrees meet.
 fn path_ok(p: &str) -> bool {
-    p.starts_with('/') && p.len() <= 400 && p.bytes().all(|b| (0x20..0x7f).contains(&b))
+    !p.is_empty()
+        && !p.starts_with('/')
+        && p.len() <= 400
+        && p.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 
 /// The seat of a conversation: `s-` and the first eight hex digits of its id,
@@ -1036,13 +1041,13 @@ mod tests {
         r.tick(T0);
         r.see(s(1), T0);
         r.see(s(2), T0);
-        assert!(r.footprint(s(1), "/r/src/a.rs", T0).is_empty());
-        assert_eq!(r.footprint(s(2), "/r/src/a.rs", T0), vec![s(1)]);
+        assert!(r.footprint(s(1), "src/a.rs", T0).is_empty());
+        assert_eq!(r.footprint(s(2), "src/a.rs", T0), vec![s(1)]);
         assert!(
-            r.footprint(s(2), "/r/src/a.rs", T0).is_empty(),
+            r.footprint(s(2), "src/a.rs", T0).is_empty(),
             "once per path"
         );
-        assert!(r.footprint(s(2), "not absolute", T0).is_empty());
+        assert!(r.footprint(s(2), "/an/absolute/path", T0).is_empty());
     }
 
     #[test]
@@ -1081,7 +1086,7 @@ mod tests {
         r.claim(s(1), &k("d"), T0);
         r.claim(s(1), &k("e"), T0);
         r.done(s(1), &k("e"), Some(sha('c')), T0);
-        r.footprint(s(1), "/r/x y.md", T0);
+        r.footprint(s(1), "x y.md", T0);
         let _ = r.pause_now(T0);
         r.claim(s(2), &k("f"), T0);
         r.watch(

@@ -143,6 +143,16 @@ fn watched_stamps(root: &Path) -> Vec<(String, String)> {
     out
 }
 
+/// An edited file's path within its checkout, the main one or a linked
+/// worktree: the folder nearest it that holds a `.git`.
+fn in_checkout(file: &str) -> Option<String> {
+    let file = Path::new(file);
+    let top = file
+        .is_absolute()
+        .then(|| file.ancestors().skip(1).find(|d| d.join(".git").exists()))??;
+    file.strip_prefix(top).ok()?.to_str().map(String::from)
+}
+
 /// Ready work: task files in `fabric/tasks/` whose status is ready (or
 /// unset), named by their file name.
 fn task_keys(root: &Path) -> Vec<Key> {
@@ -294,7 +304,7 @@ pub fn hook(kind: HookKind, v: &Value, root: &Path, heddle: &str) -> Added {
                 .and_then(Value::as_str)
         })
         .flatten()
-        .map(String::from);
+        .and_then(in_checkout);
     let push = tool == "Bash"
         && input
             .and_then(|i| i.get("command"))
@@ -629,29 +639,167 @@ mod tests {
         );
     }
 
+    /// Eight writers race for one key, 250 times: one winner each time.
+    /// Each opens the lock file itself, so the lock is contended as it is
+    /// between processes. `day0/coord-e2e.sh` races processes 1,000 times.
     #[test]
     fn the_room_lock_lets_one_writer_in_at_a_time() {
         let dir = std::env::temp_dir().join(format!("heddle-coord-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).expect("dir");
         let k = Key::parse("race").expect("key");
-        let winners: Vec<bool> = (0..8u8)
-            .map(|i| {
-                let dir = dir.clone();
-                let k = k.clone();
-                std::thread::spawn(move || {
-                    let seat = SeatId::parse(format!("s-0000000{i}").as_bytes()).expect("seat");
-                    with_room(&dir, Duration::from_secs(5), |r, now| {
-                        matches!(r.claim(seat, &k, now), Outcome::Ok(ClaimReply::Granted(_)))
+        for round in 0..250u16 {
+            let common = dir.join(round.to_string());
+            fs::create_dir_all(&common).expect("dir");
+            let winners: Vec<bool> = (0..8u8)
+                .map(|i| {
+                    let common = common.clone();
+                    let k = k.clone();
+                    std::thread::spawn(move || {
+                        let seat = SeatId::parse(format!("s-0000000{i}").as_bytes()).expect("seat");
+                        with_room(&common, Duration::from_secs(5), |r, now| {
+                            matches!(r.claim(seat, &k, now), Outcome::Ok(ClaimReply::Granted(_)))
+                        })
+                        .unwrap_or(false)
                     })
-                    .unwrap_or(false)
                 })
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|h| h.join().expect("thread"))
-            .collect();
-        assert_eq!(winners.iter().filter(|w| **w).count(), 1, "{winners:?}");
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|h| h.join().expect("thread"))
+                .collect();
+            assert_eq!(
+                winners.iter().filter(|w| **w).count(),
+                1,
+                "round {round}: {winners:?}"
+            );
+        }
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn no_room_without_a_git_folder() {
+        let dir = std::env::temp_dir().join(format!("heddle-coord-nogit-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        assert!(with_room(&dir.join(".git"), VERB_WAIT, |_, _| ()).is_none());
+        assert!(!dir.exists());
+    }
+
+    fn event(conv: &str, kind: HookKind, extra: &str) -> Value {
+        let sep = if extra.is_empty() { "" } else { "," };
+        let text = format!(
+            r#"{{"session_id":"{conv}","hook_event_name":"{}"{sep}{extra}}}"#,
+            kind.name()
+        );
+        fabric_core::json::from_slice(text.as_bytes()).expect("a payload")
+    }
+
+    #[test]
+    fn two_conversations_share_one_room_through_their_hooks() {
+        let root = std::env::temp_dir().join(format!("heddle-coord-hooks-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let common = root.join(".git");
+        fs::create_dir_all(&common).expect("dir");
+        let a = "00000001-19fa-41d2-8238-13269b9b3ca0";
+        let b = "00000002-19fa-41d2-8238-13269b9b3ca0";
+        let run = |conv: &str, kind: HookKind, extra: &str| {
+            hook(
+                kind,
+                &event(conv, kind, extra),
+                &root,
+                "/Users/me/.local/bin/heddle",
+            )
+        };
+        let room =
+            || Room::decode(&fs::read_to_string(common.join("fabric/room")).unwrap_or_default());
+
+        // The digest: who is here.
+        let first = run(a, HookKind::SessionStart, r#""source":"startup""#).context;
+        assert!(
+            first
+                .as_deref()
+                .is_some_and(|c| c.contains("This one is s-00000001.")
+                    && c.contains("No other conversation")),
+            "{first:?}"
+        );
+        let second = run(b, HookKind::SessionStart, r#""source":"startup""#).context;
+        assert!(
+            second
+                .as_deref()
+                .is_some_and(|c| c.contains("Active here in the last 15 minutes: s-00000001.")),
+            "{second:?}"
+        );
+
+        // Footprints: the second editor of a file hears of the first, once,
+        // across worktrees.
+        let wt = root.with_extension("wt");
+        fs::create_dir_all(&wt).expect("dir");
+        fs::write(wt.join(".git"), "gitdir: elsewhere\n").expect("a worktree's .git");
+        let edit = |top: &Path| {
+            format!(
+                r#""tool_name":"Edit","tool_input":{{"file_path":"{}/src/lib.rs"}}"#,
+                top.display()
+            )
+        };
+        assert!(
+            run(a, HookKind::PostToolUse, &edit(&root))
+                .context
+                .is_none()
+        );
+        let notice = run(b, HookKind::PostToolUse, &edit(&wt)).context;
+        assert!(
+            notice.as_deref().is_some_and(|c| c
+                .contains("another conversation (s-00000001) edited src/lib.rs")
+                && c.ends_with(KEEP)),
+            "{notice:?}"
+        );
+        assert!(run(b, HookKind::PostToolUse, &edit(&wt)).context.is_none());
+        let outside = r#""tool_name":"Write","tool_input":{"file_path":"/nowhere/at/all.txt"}"#;
+        assert!(run(b, HookKind::PostToolUse, outside).context.is_none());
+
+        // The done ledger reaches the other conversation at its next prompt, once.
+        let k = Key::parse("fix-login").expect("key");
+        let sa = SeatId::parse(b"s-00000001").expect("seat");
+        let sha = Sha::parse(b"0123456789abcdef0123456789abcdef01234567").expect("sha");
+        let closed = with_room(&common, VERB_WAIT, |r, now| {
+            let _ = r.claim(sa, &k, now);
+            r.done(sa, &k, Some(sha), now)
+        });
+        assert!(matches!(closed, Some(Outcome::Ok(_))), "{closed:?}");
+        let news = run(b, HookKind::UserPromptSubmit, r#""prompt":"go on""#).context;
+        assert!(
+            news.as_deref().is_some_and(|c| c.starts_with("Fabric: ")
+                && c.contains("fix-login is done.")
+                && c.ends_with(KEEP)),
+            "{news:?}"
+        );
+        assert!(
+            run(b, HookKind::UserPromptSubmit, r#""prompt":"again""#)
+                .context
+                .is_none()
+        );
+
+        // A stop holds pushes, and nothing else.
+        let push = r#""tool_name":"Bash","tool_input":{"command":"git push origin main"}"#;
+        let status = r#""tool_name":"Bash","tool_input":{"command":"git status"}"#;
+        assert!(run(b, HookKind::PreToolUse, push).deny.is_none());
+        let _ = with_room(&common, VERB_WAIT, |r, now| r.stop_now(now));
+        let held = run(b, HookKind::PreToolUse, push).deny;
+        assert!(matches!(held, Some(Msg::PushHeld(30))), "{held:?}");
+        assert!(run(b, HookKind::PreToolUse, status).deny.is_none());
+        let _ = with_room(&common, VERB_WAIT, |r, _| r.resume_now());
+        assert!(run(b, HookKind::PreToolUse, push).deny.is_none());
+
+        // A turn's end marks its seat as waiting on its person; the
+        // conversation's end takes its seat out of the room.
+        let _ = run(a, HookKind::Stop, "");
+        assert!(
+            room()
+                .seats
+                .get(&sa)
+                .is_some_and(|s| s.waiting_since.is_some())
+        );
+        let _ = run(a, HookKind::SessionEnd, r#""reason":"other""#);
+        assert!(!room().seats.contains_key(&sa));
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&wt);
     }
 }
