@@ -110,6 +110,8 @@ pub enum Msg {
     WiringKept,
     /// A Bash command matched a seatbelt.
     Seatbelt(Seatbelt),
+    /// Coordination: pushes are held for this many more minutes (a stop).
+    PushHeld(u16),
 }
 
 /// A Bash command that would switch the brake off by accident (§5 item 4).
@@ -316,6 +318,11 @@ pub fn text(m: &Msg) -> String {
             s,
             "Fabric stopped this command: it deletes ignored files, and this project's Fabric settings are \
              one of them. Leave out -x, -X or --all, or ask your person to run it themselves."
+        ),
+        Msg::PushHeld(minutes) => write!(
+            s,
+            "Fabric is holding pushes for another {minutes} minutes, as your person asked. Your work is \
+             saved locally: push it after that, or once they say resume. No action needed; keep working."
         ),
         Msg::WiringKept => write!(
             s,
