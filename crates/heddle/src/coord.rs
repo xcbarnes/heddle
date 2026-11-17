@@ -675,6 +675,37 @@ mod tests {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// A process that holds the room's lock (a hung verb, say) costs each
+    /// hook its 20 ms wait, and the hook goes on without coordination.
+    #[test]
+    fn a_held_lock_costs_a_hook_its_wait_and_blocks_nothing() {
+        let root = std::env::temp_dir().join(format!("heddle-coord-held-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join(".git/fabric")).expect("dir");
+        let holder = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(root.join(".git/fabric/room.lock"))
+            .expect("the lock file");
+        holder.lock().expect("the lock");
+        let push = event(
+            "00000001-19fa-41d2-8238-13269b9b3ca0",
+            HookKind::PreToolUse,
+            r#""tool_name":"Bash","tool_input":{"command":"git push"}"#,
+        );
+        let start = Instant::now();
+        let added = hook(HookKind::PreToolUse, &push, &root, "heddle");
+        let took = start.elapsed();
+        assert!(added.context.is_none() && added.deny.is_none());
+        assert!(
+            took >= HOOK_WAIT && took < Duration::from_millis(250),
+            "{took:?}"
+        );
+        drop(holder);
+        let _ = fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn no_room_without_a_git_folder() {
         let dir = std::env::temp_dir().join(format!("heddle-coord-nogit-{}", std::process::id()));
