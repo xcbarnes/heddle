@@ -5,7 +5,8 @@
 Runs each hook line RUNS times (default 1000) on the recorded payloads in
 adapters/claude-code/payloads/, plus PostToolUse with Bash results of 32 KiB
 (about Claude Code's own cap on Bash output), 256 KiB and 1 MiB, against a
-scratch state folder. Prints the 50th and 95th percentile and the worst run,
+scratch state folder and a scratch repo, so coordination's room is read and
+written on every run, as in a project. Prints the 50th and 95th percentile and the worst run,
 in milliseconds, wall clock, process start included. The gate is 30 ms at the
 95th percentile over the recorded payloads; the larger results show how the
 cost grows with size. No model is called.
@@ -27,7 +28,7 @@ def measure(binary, event, payload, runs, root, state):
     times = []
     for _ in range(runs):
         t0 = time.perf_counter_ns()
-        p = subprocess.run(args, input=payload, capture_output=True)
+        p = subprocess.run(args, input=payload, capture_output=True, env={"PATH": "/usr/bin:/bin"})
         times.append((time.perf_counter_ns() - t0) / 1e6)
         if p.returncode != 0:
             sys.exit(f"{event}: exit {p.returncode}")
@@ -40,6 +41,7 @@ def main():
     binary = os.path.abspath(sys.argv[1])
     runs = int(sys.argv[2]) if len(sys.argv) > 2 else 1000
     with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as state:
+        os.mkdir(os.path.join(root, ".git"))
         cases = []
         for name in sorted(os.listdir(payloads)):
             event = name.split(".")[0].split("-")[0]
