@@ -439,20 +439,30 @@ fn do_setup(count_only: bool) -> Result<String, String> {
     receipt.set_repo(&repo.main, count_only);
     receipt.write(&p.receipt)?;
 
-    let mode = if count_only {
-        "count only: hits are logged, nothing is ever stopped"
+    let bin = p.bin.display();
+    let (mode, next) = if count_only {
+        (
+            "count only: hits are logged, nothing is ever stopped",
+            format!(
+                "run `{bin} doctor`. The live check does not apply: nothing here is ever blocked."
+            ),
+        )
     } else {
-        "brake"
+        (
+            "brake",
+            format!(
+                "run `{bin} doctor --canary` (Claude Code should refuse it), then `{bin} doctor`."
+            ),
+        )
     };
     out.push_str(&format!(
         "Fabric is on for this project (heddle {VERSION}, {COMMIT}). Mode: {mode}.\n\
          Changed: {bin}; {settings} (backup kept if it existed).\n\
          This only works in sessions opened on this project's folder.\n\
-         Next: run `{bin} doctor --canary` (Claude Code should refuse it), then `{bin} doctor`.\n\n\
+         Next: {next}\n\n\
          IF CLAUDE EVER REFUSES EVERYTHING IN THIS PROJECT:\n\
          open a new session on your Documents folder and paste:\n  \
          Repair Fabric: read and follow {repair}\n",
-        bin = p.bin.display(),
         settings = file.display(),
         repair = p.repair.display(),
     ));
@@ -550,15 +560,31 @@ pub fn doctor(args: &[String]) -> ExitCode {
 }
 
 /// The live check's canary. heddle's PreToolUse hook fails on purpose when an
-/// agent runs this, so Claude Code should refuse the call. If this runs, it
-/// did not.
+/// agent runs this, so Claude Code should refuse the call. If this runs in a
+/// brake project, it did not. Anywhere else it runs as it should (a count
+/// line never blocks), and records nothing: the record is the machine's, and
+/// would mark every brake project as failing open.
 fn canary_ran() -> ExitCode {
-    if let Ok(p) = Paths::new() {
-        let _ = fs::write(
-            p.state.join("canary-ran"),
-            secs(SystemTime::now()).to_string(),
+    let Ok(p) = Paths::new() else {
+        return fail("HOME is not set to an absolute folder");
+    };
+    let here = std::env::current_dir().ok().and_then(|d| find_repo(&d));
+    let brake = here.is_some_and(|r| {
+        Receipt::read(&p.receipt)
+            .repos()
+            .into_iter()
+            .any(|(count_only, main)| main == r.main && !count_only)
+    });
+    if !brake {
+        out!(
+            "The live check applies only in a project set up in brake mode. Here nothing is ever blocked, so it shows nothing."
         );
+        return ExitCode::from(1);
     }
+    let _ = fs::write(
+        p.state.join("canary-ran"),
+        secs(SystemTime::now()).to_string(),
+    );
     out!(
         "FAIL OPEN: this Claude Code ran a check that failed on purpose, so it does not block on a broken check."
     );
