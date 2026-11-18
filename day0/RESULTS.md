@@ -207,3 +207,9 @@ With `--input-format stream-json`, `claude -p` 2.1.321 stays up after its input 
 - doctor found the wiring intact in both.
 
 The release waited about 35 minutes on GitHub: ci's macOS job was cancelled twice for want of an arm64 runner ("not acquired by Runner of type hosted"), and its third run got one within a minute.
+
+**On this computer**, 2026-11-18: the same upgrade with the attested rc.3 binary, in a brake repo and a count repo, run from the desktop session above (the one that opened before setup).
+
+- The brake repo's settings file came out byte-identical. The count repo's held the same JSON, with its top-level keys in a different order.
+- Claude Code refused `doctor --canary` ("blocking because onFailure is "block""), and doctor then reported "a deliberately broken check was blocked". No failure was recorded.
+- The installed `heddle claim` held its claim in that session.
