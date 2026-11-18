@@ -196,3 +196,5 @@ Three facts about Claude Code 2.1.321 that these runs settle:
 **The upgrade from rc.1**, by hand in a scratch HOME: `setup` with the rc.1 release binary, then `setup` with the rc.2 build over it. The hook lines went from 8 to 10 (Stop and SessionEnd added), the 24 verb allow rules followed the person's own, the person's other settings were kept, the binary and the kept copy were both rc.2, and doctor found the wiring intact.
 
 With `--input-format stream-json`, `claude -p` 2.1.321 stays up after its input closes, so the script ends it with SIGTERM; its SessionEnd line still runs.
+
+**A session that started before setup**, in the desktop app on 2.1.325, 2026-11-18. Its env file came to hold `FABRIC_SEAT` once a later SessionStart ran, but its Bash calls never saw it, and `heddle claim` said it could not tell which conversation it was. Claude Code keeps the env script it first read for a session, and here that was none. Both 2.1.321 and 2.1.325 give every command `CLAUDE_CODE_SESSION_ID`, the same id the hooks get, so the verbs now fall back to it. With that, the same session held its claim.

@@ -447,6 +447,17 @@ fn claim_line(key: &Key, out: Outcome, now: u64) -> (String, bool) {
     }
 }
 
+/// The seat a verb acts for. `FABRIC_SEAT` is what SessionStart leaves in
+/// `$CLAUDE_ENV_FILE`. Claude Code reads that file once per session and keeps
+/// what it read, so a session that started before setup never sees it; but
+/// Claude Code also gives every command `CLAUDE_CODE_SESSION_ID`, the same id
+/// the hooks get.
+fn seat_from(env: impl Fn(&str) -> Option<String>) -> Option<SeatId> {
+    ["FABRIC_SEAT", "CLAUDE_CODE_SESSION_ID"]
+        .into_iter()
+        .find_map(|v| room::seat_of(&ConvId::parse(env(v)?.as_bytes())?))
+}
+
 /// `heddle next | claim | release | done | pause | stop | resume | status`.
 pub fn verb(name: &str, args: &[String]) -> ExitCode {
     let Ok(p) = Paths::of_this_binary() else {
@@ -473,11 +484,7 @@ pub fn verb(name: &str, args: &[String]) -> ExitCode {
             false,
         );
     }
-    let seat = std::env::var("FABRIC_SEAT")
-        .ok()
-        .and_then(|s| ConvId::parse(s.as_bytes()))
-        .and_then(|c| room::seat_of(&c));
-    let Some(seat) = seat else {
+    let Some(seat) = seat_from(|v| std::env::var(v).ok()) else {
         return say(
             "heddle cannot tell which conversation this is. Run it as a Bash command in a Claude session opened on this project.",
             false,
@@ -600,6 +607,27 @@ fn status(common: &Path) {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_verb_finds_its_conversation_without_the_env_file() {
+        let a = "0000000a-0000-4000-8000-000000000000";
+        let b = "0000000b-0000-4000-8000-000000000000";
+        let only = |name: &'static str, id: &'static str| {
+            move |v: &str| (v == name).then(|| id.to_string())
+        };
+        let seat = |s: &[u8]| SeatId::parse(s);
+        assert_eq!(
+            seat_from(only("CLAUDE_CODE_SESSION_ID", a)),
+            seat(b"s-0000000a")
+        );
+        assert_eq!(seat_from(only("FABRIC_SEAT", b)), seat(b"s-0000000b"));
+        // Both set: the env file's wins. A value that is not an id is skipped.
+        let both = |v: &str| Some(if v == "FABRIC_SEAT" { b } else { a }.to_string());
+        assert_eq!(seat_from(both), seat(b"s-0000000b"));
+        let junk = |v: &str| Some(if v == "FABRIC_SEAT" { "x" } else { a }.to_string());
+        assert_eq!(seat_from(junk), seat(b"s-0000000a"));
+        assert_eq!(seat_from(|_| None), None);
+    }
 
     #[test]
     fn pushes_are_recognised_in_any_segment() {
