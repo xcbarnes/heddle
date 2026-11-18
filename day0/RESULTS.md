@@ -198,3 +198,12 @@ Three facts about Claude Code 2.1.321 that these runs settle:
 With `--input-format stream-json`, `claude -p` 2.1.321 stays up after its input closes, so the script ends it with SIGTERM; its SessionEnd line still runs.
 
 **A session that started before setup**, in the desktop app on 2.1.325, 2026-11-18. Its env file came to hold `FABRIC_SEAT` once a later SessionStart ran, but its Bash calls never saw it, and `heddle claim` said it could not tell which conversation it was. Claude Code keeps the env script it first read for a session, and here that was none. Both 2.1.321 and 2.1.325 give every command `CLAUDE_CODE_SESSION_ID`, the same id the hooks get, so the verbs now fall back to it. With that, the same session held its claim.
+
+**The upgrade from rc.2**, in a scratch HOME, 2026-11-18. `setup` with the rc.2 release binary in a brake repo and a count repo, then `setup` with the rc.3 release binary (attestation verified) over both:
+
+- Before and after, the hook lines were 10 (7 with `onFailure`) and 9 (none), with 24 verb allow rules each. Git saw no changed files, and the installed binary and the kept copy were both rc.3.
+- `doctor --canary` run in the count repo printed that the live check applies only in a brake project, and recorded nothing.
+- A verb given only `CLAUDE_CODE_SESSION_ID` got its claim.
+- doctor found the wiring intact in both.
+
+The release waited about 35 minutes on GitHub: ci's macOS job was cancelled twice for want of an arm64 runner ("not acquired by Runner of type hosted"), and its third run got one within a minute.
