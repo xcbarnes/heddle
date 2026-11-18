@@ -2,7 +2,7 @@
 
 A small coordination layer for many parallel AI coding agents: expiring claims, live status and a fail-closed PHI brake, wired into harness hooks. Part of the Fabric project: "air traffic control at the speed of agentic development".
 
-**Status: v0.1 release candidates.** rc.1 is the PHI brake; rc.2 adds coordination between the conversations on one computer, through a local room. The hosted room comes later.
+**Status: v0.1 release candidates.** rc.1 is the PHI brake; rc.2 adds coordination between the conversations on one computer, through a local room; rc.3 fixes what using it turned up. The hosted room comes later.
 
 ## What it is
 
